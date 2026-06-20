@@ -118,3 +118,60 @@ export const getAllPaymentsForAdmin = async (
     });
   }
 };
+export const getMyBookingPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+    const bookingId = Number(request.params.bookingId);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const booking = await prisma.bookings.findFirst({
+      where: {
+        id: bookingId,
+        customer_id: customerId,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Booking not found",
+      });
+    }
+
+    const payment = await prisma.payments.findUnique({
+      where: {
+        booking_id: bookingId,
+      },
+    });
+
+    if (!payment) {
+      return response.status(404).json({
+        message: "Payment record not found",
+      });
+    }
+
+    return response.status(200).json({
+      message: "Payment fetched successfully",
+      payment,
+    });
+  } catch (error) {
+    console.error("Get customer payment error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching the payment",
+    });
+  }
+};
