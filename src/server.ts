@@ -56,3 +56,45 @@ app.get("/database-test", async (request, response) => {
 app.listen(PORT, () => {
   console.log(`Dwaar Sewa server is running on port ${PORT}`);
 });
+app.get("/health", async (request, response) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+
+    return response.status(200).json({
+      status: "ok",
+      server: "running",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Health check error:", error);
+
+    return response.status(503).json({
+      status: "error",
+      server: "running",
+      database: "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+app.get("/health", async (request, response) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+
+    return response.status(200).json({
+      status: "ok",
+      server: "running",
+      database: "connected",
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Health check error:", error);
+
+    return response.status(503).json({
+      status: "error",
+      server: "running",
+      database: "disconnected",
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
