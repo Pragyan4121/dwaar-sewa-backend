@@ -306,3 +306,81 @@ export const getProviders = async (
     });
   }
 };
+export const updateProviderStatus = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const providerId = Number(request.params.id);
+    const { isActive } = request.body;
+
+    if (!Number.isInteger(providerId) || providerId <= 0) {
+      return response.status(400).json({
+        message: "Invalid provider ID",
+      });
+    }
+
+    if (typeof isActive !== "boolean") {
+      return response.status(400).json({
+        message: "isActive must be true or false",
+      });
+    }
+
+    const providerRole = await prisma.roles.findUnique({
+      where: {
+        name: "provider",
+      },
+    });
+
+    if (!providerRole) {
+      return response.status(500).json({
+        message: "Provider role is not configured in the database",
+      });
+    }
+
+    const provider = await prisma.users.findFirst({
+      where: {
+        id: providerId,
+        role_id: providerRole.id,
+      },
+    });
+
+    if (!provider) {
+      return response.status(404).json({
+        message: "Provider not found",
+      });
+    }
+
+    const updatedProvider = await prisma.users.update({
+      where: {
+        id: providerId,
+      },
+      data: {
+        is_active: isActive,
+        updated_at: new Date(),
+      },
+      select: {
+        id: true,
+        full_name: true,
+        phone: true,
+        email: true,
+        role_id: true,
+        is_active: true,
+        updated_at: true,
+      },
+    });
+
+    return response.status(200).json({
+      message: isActive
+        ? "Provider activated successfully"
+        : "Provider deactivated successfully",
+      provider: updatedProvider,
+    });
+  } catch (error) {
+    console.error("Update provider status error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while updating provider status",
+    });
+  }
+};

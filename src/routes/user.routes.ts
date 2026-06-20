@@ -5,6 +5,7 @@ import {
   getMyProfile,
   createProvider,
   getProviders,
+  updateProviderStatus,
 } from "../controllers/user.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
@@ -16,8 +17,16 @@ router.post("/login", loginUser);
 
 router.get("/me", authenticateUser, getMyProfile);
 
+// Admin-only provider routes
 router.post("/providers", authenticateUser, allowRoles(3), createProvider);
 
 router.get("/providers", authenticateUser, allowRoles(3), getProviders);
+
+router.patch(
+  "/providers/:id/status",
+  authenticateUser,
+  allowRoles(3),
+  updateProviderStatus,
+);
 
 export default router;
