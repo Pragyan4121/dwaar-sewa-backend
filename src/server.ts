@@ -7,6 +7,7 @@ import serviceRoutes from "./routes/service.routes";
 import bookingRoutes from "./routes/booking.routes";
 import paymentRoutes from "./routes/payment.routes";
 import reviewRoutes from "./routes/review.routes";
+import walletRoutes from "./routes/wallet.routes";
 
 dotenv.config();
 
@@ -23,6 +24,7 @@ app.use("/api/services", serviceRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/wallets", walletRoutes);
 
 app.get("/", (request, response) => {
   response.json({
