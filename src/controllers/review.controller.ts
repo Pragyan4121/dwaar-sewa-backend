@@ -145,3 +145,49 @@ export const updateReviewVisibility = async (
     });
   }
 };
+export const getAllReviewsForAdmin = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const reviews = await prisma.reviews.findMany({
+      include: {
+        users_reviews_customer_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
+        users_reviews_provider_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
+        bookings: {
+          select: {
+            id: true,
+            service_id: true,
+            status: true,
+          },
+        },
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "All reviews fetched successfully",
+      reviews,
+    });
+  } catch (error) {
+    console.error("Get all reviews error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching reviews",
+    });
+  }
+};

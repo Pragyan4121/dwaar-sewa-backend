@@ -2,6 +2,7 @@ import { Router } from "express";
 import {
   createReview,
   updateReviewVisibility,
+  getAllReviewsForAdmin,
 } from "../controllers/review.controller";
 import { getProviderReviews } from "../controllers/provider-review.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
@@ -20,7 +21,14 @@ router.post(
   createReview,
 );
 
-// Admin-only route
+// Admin-only routes
+router.get(
+  "/admin/all",
+  authenticateUser,
+  allowRoles(3),
+  getAllReviewsForAdmin,
+);
+
 router.patch(
   "/admin/:id/visibility",
   authenticateUser,
