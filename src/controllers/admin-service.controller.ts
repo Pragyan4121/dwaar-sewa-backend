@@ -166,3 +166,40 @@ export const updateService = async (
     });
   }
 };
+export const getServiceByIdForAdmin = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const serviceId = Number(request.params.id);
+
+    if (!Number.isInteger(serviceId) || serviceId <= 0) {
+      return response.status(400).json({
+        message: "Invalid service ID",
+      });
+    }
+
+    const service = await prisma.services.findUnique({
+      where: {
+        id: serviceId,
+      },
+    });
+
+    if (!service) {
+      return response.status(404).json({
+        message: "Service not found",
+      });
+    }
+
+    return response.status(200).json({
+      message: "Service fetched successfully",
+      service,
+    });
+  } catch (error) {
+    console.error("Get service error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching the service",
+    });
+  }
+};
