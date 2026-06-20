@@ -203,3 +203,26 @@ export const getServiceByIdForAdmin = async (
     });
   }
 };
+export const getAllServicesForAdmin = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const services = await prisma.services.findMany({
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "All services fetched successfully",
+      services,
+    });
+  } catch (error) {
+    console.error("Get all services error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching services",
+    });
+  }
+};

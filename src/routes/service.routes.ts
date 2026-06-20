@@ -4,6 +4,7 @@ import {
   createService,
   updateService,
   getServiceByIdForAdmin,
+  getAllServicesForAdmin,
 } from "../controllers/admin-service.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
@@ -14,6 +15,13 @@ const router = Router();
 router.get("/", getActiveServices);
 
 // Admin-only routes
+router.get(
+  "/admin/all",
+  authenticateUser,
+  allowRoles(3),
+  getAllServicesForAdmin,
+);
+
 router.get(
   "/admin/:id",
   authenticateUser,
