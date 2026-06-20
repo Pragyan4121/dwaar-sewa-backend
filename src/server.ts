@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { prisma } from "./config/prisma";
 import userRoutes from "./routes/user.routes";
 import serviceRoutes from "./routes/service.routes";
+import bookingRoutes from "./routes/booking.routes";
 
 dotenv.config();
 
@@ -17,6 +18,7 @@ app.use(express.json());
 // Routes
 app.use("/api/users", userRoutes);
 app.use("/api/services", serviceRoutes);
+app.use("/api/bookings", bookingRoutes);
 
 app.get("/", (request, response) => {
   response.json({
