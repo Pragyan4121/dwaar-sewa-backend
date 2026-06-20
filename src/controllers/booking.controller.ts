@@ -354,3 +354,53 @@ export const assignProviderToBooking = async (
     });
   }
 };
+export const getAssignedBookingsForProvider = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const providerId = request.user?.userId;
+
+    if (!providerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    const bookings = await prisma.bookings.findMany({
+      where: {
+        provider_id: providerId,
+      },
+      include: {
+        users_bookings_customer_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
+        services: {
+          select: {
+            id: true,
+            name: true,
+            base_price: true,
+          },
+        },
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "Assigned bookings fetched successfully",
+      bookings,
+    });
+  } catch (error) {
+    console.error("Provider bookings error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching assigned bookings",
+    });
+  }
+};

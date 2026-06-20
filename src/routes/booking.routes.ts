@@ -6,6 +6,7 @@ import {
   cancelMyBooking,
   getAllBookingsForAdmin,
   assignProviderToBooking,
+  getAssignedBookingsForProvider,
 } from "../controllers/booking.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
@@ -14,6 +15,13 @@ const router = Router();
 
 router.post("/", authenticateUser, createBooking);
 router.get("/me", authenticateUser, getMyBookings);
+
+router.get(
+  "/provider/assigned",
+  authenticateUser,
+  allowRoles(2),
+  getAssignedBookingsForProvider,
+);
 
 router.get(
   "/admin/all",
