@@ -457,3 +457,86 @@ export const updateMyProfile = async (
     });
   }
 };
+export const changeMyPassword = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { currentPassword, newPassword } = request.body;
+
+    if (!userId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!currentPassword || !newPassword) {
+      return response.status(400).json({
+        message: "Current password and new password are required",
+      });
+    }
+
+    if (newPassword.length < 8) {
+      return response.status(400).json({
+        message: "New password must be at least 8 characters long",
+      });
+    }
+
+    const user = await prisma.users.findUnique({
+      where: {
+        id: userId,
+      },
+    });
+
+    if (!user) {
+      return response.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const currentPasswordMatches = await bcrypt.compare(
+      currentPassword,
+      user.password_hash,
+    );
+
+    if (!currentPasswordMatches) {
+      return response.status(400).json({
+        message: "Current password is incorrect",
+      });
+    }
+
+    const sameAsOldPassword = await bcrypt.compare(
+      newPassword,
+      user.password_hash,
+    );
+
+    if (sameAsOldPassword) {
+      return response.status(400).json({
+        message: "New password must be different from the current password",
+      });
+    }
+
+    const newPasswordHash = await bcrypt.hash(newPassword, 10);
+
+    await prisma.users.update({
+      where: {
+        id: userId,
+      },
+      data: {
+        password_hash: newPasswordHash,
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: "Password changed successfully",
+    });
+  } catch (error) {
+    console.error("Change password error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while changing the password",
+    });
+  }
+};
