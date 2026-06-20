@@ -384,3 +384,76 @@ export const updateProviderStatus = async (
     });
   }
 };
+export const updateMyProfile = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const userId = request.user?.userId;
+    const { fullName, email } = request.body;
+
+    if (!userId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (fullName !== undefined && !fullName.trim()) {
+      return response.status(400).json({
+        message: "Full name cannot be empty",
+      });
+    }
+
+    if (email !== undefined && email) {
+      const existingEmail = await prisma.users.findFirst({
+        where: {
+          email,
+          NOT: {
+            id: userId,
+          },
+        },
+      });
+
+      if (existingEmail) {
+        return response.status(409).json({
+          message: "This email is already being used",
+        });
+      }
+    }
+
+    const updatedUser = await prisma.users.update({
+      where: {
+        id: userId,
+      },
+      data: {
+        ...(fullName !== undefined && {
+          full_name: fullName.trim(),
+        }),
+        ...(email !== undefined && {
+          email: email || null,
+        }),
+        updated_at: new Date(),
+      },
+      select: {
+        id: true,
+        full_name: true,
+        phone: true,
+        email: true,
+        role_id: true,
+        is_active: true,
+        updated_at: true,
+      },
+    });
+
+    return response.status(200).json({
+      message: "Profile updated successfully",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while updating the profile",
+    });
+  }
+};

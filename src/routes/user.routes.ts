@@ -3,6 +3,7 @@ import {
   registerUser,
   loginUser,
   getMyProfile,
+  updateMyProfile,
   createProvider,
   getProviders,
   updateProviderStatus,
@@ -12,10 +13,13 @@ import { allowRoles } from "../middlewares/role.middleware";
 
 const router = Router();
 
+// Public routes
 router.post("/register", registerUser);
 router.post("/login", loginUser);
 
+// Logged-in user routes
 router.get("/me", authenticateUser, getMyProfile);
+router.patch("/me", authenticateUser, updateMyProfile);
 
 // Admin-only provider routes
 router.post("/providers", authenticateUser, allowRoles(3), createProvider);
