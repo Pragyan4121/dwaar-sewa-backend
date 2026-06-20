@@ -404,3 +404,133 @@ export const getAssignedBookingsForProvider = async (
     });
   }
 };
+export const startAssignedBooking = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const providerId = request.user?.userId;
+    const bookingId = Number(request.params.id);
+
+    if (!providerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const booking = await prisma.bookings.findFirst({
+      where: {
+        id: bookingId,
+        provider_id: providerId,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Assigned booking not found",
+      });
+    }
+
+    if (booking.status !== "assigned") {
+      return response.status(400).json({
+        message: `Booking cannot be started because its status is ${booking.status}`,
+      });
+    }
+
+    const updatedBooking = await prisma.bookings.update({
+      where: {
+        id: bookingId,
+      },
+      data: {
+        status: "in_progress",
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: "Booking started successfully",
+      booking: updatedBooking,
+    });
+  } catch (error) {
+    console.error("Start booking error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while starting the booking",
+    });
+  }
+};
+export const completeAssignedBooking = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const providerId = request.user?.userId;
+    const bookingId = Number(request.params.id);
+    const finalPrice = Number(request.body.finalPrice);
+
+    if (!providerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    if (!Number.isFinite(finalPrice) || finalPrice < 0) {
+      return response.status(400).json({
+        message: "Valid final price is required",
+      });
+    }
+
+    const booking = await prisma.bookings.findFirst({
+      where: {
+        id: bookingId,
+        provider_id: providerId,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Assigned booking not found",
+      });
+    }
+
+    if (booking.status !== "in_progress") {
+      return response.status(400).json({
+        message: `Booking cannot be completed because its status is ${booking.status}`,
+      });
+    }
+
+    const completedBooking = await prisma.bookings.update({
+      where: {
+        id: bookingId,
+      },
+      data: {
+        status: "completed",
+        final_price: finalPrice,
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: "Booking completed successfully",
+      booking: completedBooking,
+    });
+  } catch (error) {
+    console.error("Complete booking error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while completing the booking",
+    });
+  }
+};
