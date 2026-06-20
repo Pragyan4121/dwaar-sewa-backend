@@ -190,3 +190,73 @@ export const getMyProfile = async (
     });
   }
 };
+export const createProvider = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const { fullName, phone, email, password } = request.body;
+
+    if (!fullName || !phone || !password) {
+      return response.status(400).json({
+        message: "Full name, phone and password are required",
+      });
+    }
+
+    const existingUser = await prisma.users.findFirst({
+      where: {
+        OR: [{ phone }, ...(email ? [{ email }] : [])],
+      },
+    });
+
+    if (existingUser) {
+      return response.status(409).json({
+        message: "A user with this phone or email already exists",
+      });
+    }
+
+    const providerRole = await prisma.roles.findUnique({
+      where: {
+        name: "provider",
+      },
+    });
+
+    if (!providerRole) {
+      return response.status(500).json({
+        message: "Provider role is not configured in the database",
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const provider = await prisma.users.create({
+      data: {
+        full_name: fullName,
+        phone,
+        email: email || null,
+        password_hash: passwordHash,
+        role_id: providerRole.id,
+      },
+      select: {
+        id: true,
+        full_name: true,
+        phone: true,
+        email: true,
+        role_id: true,
+        is_active: true,
+        created_at: true,
+      },
+    });
+
+    return response.status(201).json({
+      message: "Provider created successfully",
+      provider,
+    });
+  } catch (error) {
+    console.error("Create provider error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while creating the provider",
+    });
+  }
+};
