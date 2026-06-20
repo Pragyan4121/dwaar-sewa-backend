@@ -4,13 +4,21 @@ import {
   getMyBookings,
   getMyBookingById,
   cancelMyBooking,
+  getAllBookingsForAdmin,
 } from "../controllers/booking.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
+import { allowRoles } from "../middlewares/role.middleware";
 
 const router = Router();
 
 router.post("/", authenticateUser, createBooking);
 router.get("/me", authenticateUser, getMyBookings);
+router.get(
+  "/admin/all",
+  authenticateUser,
+  allowRoles(3),
+  getAllBookingsForAdmin,
+);
 router.get("/:id", authenticateUser, getMyBookingById);
 router.patch("/:id/cancel", authenticateUser, cancelMyBooking);
 

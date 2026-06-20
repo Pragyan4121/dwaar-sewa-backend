@@ -221,3 +221,49 @@ export const cancelMyBooking = async (
     });
   }
 };
+export const getAllBookingsForAdmin = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const bookings = await prisma.bookings.findMany({
+      include: {
+        users_bookings_customer_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
+        users_bookings_provider_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
+        services: {
+          select: {
+            id: true,
+            name: true,
+            base_price: true,
+          },
+        },
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "All bookings fetched successfully",
+      bookings,
+    });
+  } catch (error) {
+    console.error("Admin bookings error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching bookings",
+    });
+  }
+};
