@@ -89,3 +89,59 @@ export const createReview = async (
     });
   }
 };
+export const updateReviewVisibility = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const reviewId = Number(request.params.id);
+    const { isVisible } = request.body;
+
+    if (!Number.isInteger(reviewId) || reviewId <= 0) {
+      return response.status(400).json({
+        message: "Invalid review ID",
+      });
+    }
+
+    if (typeof isVisible !== "boolean") {
+      return response.status(400).json({
+        message: "isVisible must be true or false",
+      });
+    }
+
+    const existingReview = await prisma.reviews.findUnique({
+      where: {
+        id: reviewId,
+      },
+    });
+
+    if (!existingReview) {
+      return response.status(404).json({
+        message: "Review not found",
+      });
+    }
+
+    const review = await prisma.reviews.update({
+      where: {
+        id: reviewId,
+      },
+      data: {
+        is_visible: isVisible,
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: isVisible
+        ? "Review made visible successfully"
+        : "Review hidden successfully",
+      review,
+    });
+  } catch (error) {
+    console.error("Update review visibility error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while updating the review",
+    });
+  }
+};
