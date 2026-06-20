@@ -260,3 +260,49 @@ export const createProvider = async (
     });
   }
 };
+export const getProviders = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const providerRole = await prisma.roles.findUnique({
+      where: {
+        name: "provider",
+      },
+    });
+
+    if (!providerRole) {
+      return response.status(500).json({
+        message: "Provider role is not configured in the database",
+      });
+    }
+
+    const providers = await prisma.users.findMany({
+      where: {
+        role_id: providerRole.id,
+      },
+      select: {
+        id: true,
+        full_name: true,
+        phone: true,
+        email: true,
+        is_active: true,
+        created_at: true,
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "Providers fetched successfully",
+      providers,
+    });
+  } catch (error) {
+    console.error("Get providers error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching providers",
+    });
+  }
+};
