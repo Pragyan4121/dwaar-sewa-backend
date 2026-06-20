@@ -12,6 +12,7 @@ import reviewRoutes from "./routes/review.routes";
 import walletRoutes from "./routes/wallet.routes";
 import providerRoutes from "./routes/provider.routes";
 import adminDashboardRoutes from "./routes/admin-dashboard.routes";
+import { errorHandler } from "./middlewares/error.middleware";
 
 dotenv.config();
 
@@ -88,6 +89,7 @@ app.use((request, response) => {
     path: request.originalUrl,
   });
 });
+app.use(errorHandler);
 
 // Start server
 app.listen(PORT, () => {
