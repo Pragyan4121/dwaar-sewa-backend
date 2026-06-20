@@ -67,3 +67,36 @@ export const getProviderProfile = async (
     });
   }
 };
+export const getActiveProviders = async (
+  request: Request,
+  response: Response,
+) => {
+  try {
+    const providers = await prisma.users.findMany({
+      where: {
+        role_id: 2,
+        is_active: true,
+      },
+      select: {
+        id: true,
+        full_name: true,
+        email: true,
+        created_at: true,
+      },
+      orderBy: {
+        full_name: "asc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "Providers fetched successfully",
+      providers,
+    });
+  } catch (error) {
+    console.error("Get providers error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching providers",
+    });
+  }
+};
