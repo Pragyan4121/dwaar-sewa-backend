@@ -71,3 +71,40 @@ export const createBooking = async (
     });
   }
 };
+export const getMyBookings = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    const bookings = await prisma.bookings.findMany({
+      where: {
+        customer_id: customerId,
+      },
+      include: {
+        services: true,
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "Bookings fetched successfully",
+      bookings,
+    });
+  } catch (error) {
+    console.error("Get bookings error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching bookings",
+    });
+  }
+};
