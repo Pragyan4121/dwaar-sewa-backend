@@ -267,3 +267,90 @@ export const getAllBookingsForAdmin = async (
     });
   }
 };
+export const assignProviderToBooking = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const bookingId = Number(request.params.id);
+    const providerId = Number(request.body.providerId);
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    if (!Number.isInteger(providerId) || providerId <= 0) {
+      return response.status(400).json({
+        message: "Valid provider ID is required",
+      });
+    }
+
+    const booking = await prisma.bookings.findUnique({
+      where: {
+        id: bookingId,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Booking not found",
+      });
+    }
+
+    if (booking.status === "cancelled" || booking.status === "completed") {
+      return response.status(400).json({
+        message: `Provider cannot be assigned because booking status is ${booking.status}`,
+      });
+    }
+
+    const providerRole = await prisma.roles.findUnique({
+      where: {
+        name: "provider",
+      },
+    });
+
+    if (!providerRole) {
+      return response.status(500).json({
+        message: "Provider role is not configured in the database",
+      });
+    }
+
+    const provider = await prisma.users.findFirst({
+      where: {
+        id: providerId,
+        role_id: providerRole.id,
+        is_active: true,
+      },
+    });
+
+    if (!provider) {
+      return response.status(404).json({
+        message: "Active provider not found",
+      });
+    }
+
+    const updatedBooking = await prisma.bookings.update({
+      where: {
+        id: bookingId,
+      },
+      data: {
+        provider_id: providerId,
+        status: "assigned",
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: "Provider assigned successfully",
+      booking: updatedBooking,
+    });
+  } catch (error) {
+    console.error("Assign provider error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while assigning the provider",
+    });
+  }
+};
