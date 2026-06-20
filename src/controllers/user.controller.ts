@@ -6,11 +6,11 @@ import { AuthenticatedRequest } from "../middlewares/auth.middleware";
 
 export const registerUser = async (request: Request, response: Response) => {
   try {
-    const { fullName, phone, email, password, role } = request.body;
+    const { fullName, phone, email, password } = request.body;
 
-    if (!fullName || !phone || !password || !role) {
+    if (!fullName || !phone || !password) {
       return response.status(400).json({
-        message: "Full name, phone, password and role are required",
+        message: "Full name, phone and password are required",
       });
     }
 
@@ -28,13 +28,13 @@ export const registerUser = async (request: Request, response: Response) => {
 
     const selectedRole = await prisma.roles.findUnique({
       where: {
-        name: role,
+        name: "customer",
       },
     });
 
     if (!selectedRole) {
-      return response.status(400).json({
-        message: "Invalid user role",
+      return response.status(500).json({
+        message: "Customer role is not configured in the database",
       });
     }
 
