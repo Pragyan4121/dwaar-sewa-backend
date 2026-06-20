@@ -83,3 +83,38 @@ export const createPaymentForBooking = async (
     });
   }
 };
+export const getAllPaymentsForAdmin = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const payments = await prisma.payments.findMany({
+      include: {
+        bookings: {
+          select: {
+            id: true,
+            customer_id: true,
+            provider_id: true,
+            service_id: true,
+            status: true,
+            final_price: true,
+          },
+        },
+      },
+      orderBy: {
+        created_at: "desc",
+      },
+    });
+
+    return response.status(200).json({
+      message: "All payments fetched successfully",
+      payments,
+    });
+  } catch (error) {
+    console.error("Get all payments error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while fetching payments",
+    });
+  }
+};
