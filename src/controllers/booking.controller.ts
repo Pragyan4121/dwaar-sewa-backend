@@ -156,3 +156,68 @@ export const getMyBookingById = async (
     });
   }
 };
+export const cancelMyBooking = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+    const bookingId = Number(request.params.id);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!Number.isInteger(bookingId) || bookingId <= 0) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const booking = await prisma.bookings.findFirst({
+      where: {
+        id: bookingId,
+        customer_id: customerId,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Booking not found",
+      });
+    }
+
+    if (
+      booking.status === "completed" ||
+      booking.status === "cancelled" ||
+      booking.status === "in_progress"
+    ) {
+      return response.status(400).json({
+        message: `Booking cannot be cancelled because its status is ${booking.status}`,
+      });
+    }
+
+    const cancelledBooking = await prisma.bookings.update({
+      where: {
+        id: bookingId,
+      },
+      data: {
+        status: "cancelled",
+        updated_at: new Date(),
+      },
+    });
+
+    return response.status(200).json({
+      message: "Booking cancelled successfully",
+      booking: cancelledBooking,
+    });
+  } catch (error) {
+    console.error("Cancel booking error:", error);
+
+    return response.status(500).json({
+      message: "Something went wrong while cancelling the booking",
+    });
+  }
+};
