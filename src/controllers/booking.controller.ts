@@ -1455,23 +1455,42 @@ export const completeAssignedBooking = async (
       |--------------------------------------------------------------------------
       */
 
+      const walletTransactionType = walletDelta < 0 ? "debit" : "credit";
+
+      const walletTransactionAmount =
+        Math.round(Math.abs(walletDelta) * 100) / 100;
+
+      const walletSourceType = isCashBooking
+        ? walletDelta < 0
+          ? "cash_commission_due"
+          : "cash_booking_adjustment"
+        : "booking_earning";
+
+      const walletDescription = isCashBooking
+        ? walletDelta < 0
+          ? `Settlement due to platform for cash booking #${bookingId}`
+          : walletDelta > 0
+            ? `Platform-funded promotion adjustment credited for cash booking #${bookingId}`
+            : `Cash booking #${bookingId} settled with no wallet adjustment`
+        : `Earning credited for completed booking #${bookingId}`;
+
       const walletTransaction = await transaction.wallet_transactions.create({
         data: {
           wallet_id: wallet.id,
           booking_id: bookingId,
-          transaction_type: isCashBooking ? "debit" : "credit",
-          source_type: isCashBooking
-            ? "cash_commission_due"
-            : "booking_earning",
-          amount: (isCashBooking
-            ? commissionAmount
-            : providerNetAmount
-          ).toFixed(2),
+
+          transaction_type: walletTransactionType,
+
+          source_type: walletSourceType,
+
+          amount: walletTransactionAmount.toFixed(2),
+
           balance_before: balanceBefore.toFixed(2),
+
           balance_after: balanceAfter.toFixed(2),
-          description: isCashBooking
-            ? `Commission owed for cash booking #${bookingId} (customer paid you directly)`
-            : `Earning credited for completed booking #${bookingId}`,
+
+          description: walletDescription,
+
           created_at: now,
         },
       });

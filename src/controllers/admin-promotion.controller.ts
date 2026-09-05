@@ -630,3 +630,59 @@ export async function setPromotionStatus(request: Request, response: Response) {
     });
   }
 }
+export async function deletePromotion(request: Request, response: Response) {
+  const promotionId = Number(request.params.id);
+
+  if (!Number.isInteger(promotionId) || promotionId <= 0) {
+    return response.status(400).json({
+      message: "Invalid promotion id.",
+    });
+  }
+
+  try {
+    const promotion = await prisma.promotion_campaigns.findUnique({
+      where: {
+        id: promotionId,
+      },
+      select: {
+        id: true,
+        code: true,
+        _count: {
+          select: {
+            redemptions: true,
+            bookings: true,
+          },
+        },
+      },
+    });
+
+    if (!promotion) {
+      return response.status(404).json({
+        message: "Promotion not found.",
+      });
+    }
+
+    if (promotion._count.redemptions > 0 || promotion._count.bookings > 0) {
+      return response.status(409).json({
+        message:
+          "This promotion has booking or redemption history and cannot be permanently deleted. Deactivate it instead.",
+      });
+    }
+
+    await prisma.promotion_campaigns.delete({
+      where: {
+        id: promotionId,
+      },
+    });
+
+    return response.status(200).json({
+      message: `Promotion ${promotion.code} deleted successfully.`,
+    });
+  } catch (error) {
+    console.error("Failed to delete promotion:", error);
+
+    return response.status(500).json({
+      message: "Could not delete promotion.",
+    });
+  }
+}

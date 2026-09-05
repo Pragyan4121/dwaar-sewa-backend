@@ -11,6 +11,7 @@ import {
   getAdminPromotions,
   setPromotionStatus,
   updatePromotion,
+  deletePromotion,
 } from "../controllers/admin-promotion.controller";
 
 import { authenticateUser } from "../middlewares/auth.middleware";
@@ -65,6 +66,12 @@ router.patch(
   authenticateUser,
   allowRoles(ROLE_NAMES.ADMIN),
   setPromotionStatus,
+);
+router.delete(
+  "/admin/:id",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.ADMIN),
+  deletePromotion,
 );
 
 export default router;
