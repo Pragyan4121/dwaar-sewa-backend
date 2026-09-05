@@ -1,65 +1,195 @@
 import { Router } from "express";
+
+import { ROLE_NAMES } from "../constants/roles";
+
 import {
-  createBooking,
-  getMyBookings,
-  getMyBookingById,
-  cancelMyBooking,
-  getAllBookingsForAdmin,
   assignProviderToBooking,
-  getAssignedBookingsForProvider,
-  startAssignedBooking,
+  cancelBookingForAdmin,
+  getAllBookingsForAdmin,
+  getBookingByIdForAdmin,
+} from "../controllers/admin-booking.controller";
+
+import {
+  cancelMyBooking,
   completeAssignedBooking,
+  createBooking,
+  getAssignedBookingsForProvider,
+  getMyBookingById,
+  getMyBookings,
+  startAssignedBooking,
 } from "../controllers/booking.controller";
+
+import {
+  acceptBookingForProvider,
+  getAvailableBookingsForProvider,
+  getProviderBookingById,
+  markAssignedBookingArrived,
+  markAssignedBookingTravelling,
+  rejectBookingForProvider,
+} from "../controllers/provider-booking.controller";
+
 import { authenticateUser } from "../middlewares/auth.middleware";
+import { requireApprovedProvider } from "../middlewares/provider-approval.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
 
 const router = Router();
 
-// Customer routes
-router.post("/", authenticateUser, allowRoles(1), createBooking);
+/*
+|--------------------------------------------------------------------------
+| Customer booking routes
+|--------------------------------------------------------------------------
+*/
 
-router.get("/me", authenticateUser, allowRoles(1), getMyBookings);
+router.post(
+  "/",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.CUSTOMER),
+  createBooking,
+);
 
-router.patch("/:id/cancel", authenticateUser, allowRoles(1), cancelMyBooking);
+router.get(
+  "/me",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.CUSTOMER),
+  getMyBookings,
+);
 
-// Provider routes
+router.patch(
+  "/:id/cancel",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.CUSTOMER),
+  cancelMyBooking,
+);
+
+/*
+|--------------------------------------------------------------------------
+| Provider booking routes
+|--------------------------------------------------------------------------
+|
+| Keep static provider routes before dynamic /provider/:id.
+|--------------------------------------------------------------------------
+*/
+
+router.get(
+  "/provider/available",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  getAvailableBookingsForProvider,
+);
+
 router.get(
   "/provider/assigned",
   authenticateUser,
-  allowRoles(2),
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
   getAssignedBookingsForProvider,
+);
+
+router.patch(
+  "/provider/:id/accept",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  acceptBookingForProvider,
+);
+
+router.patch(
+  "/provider/:id/travelling",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  markAssignedBookingTravelling,
+);
+
+router.patch(
+  "/provider/:id/arrived",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  markAssignedBookingArrived,
 );
 
 router.patch(
   "/provider/:id/start",
   authenticateUser,
-  allowRoles(2),
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
   startAssignedBooking,
 );
 
 router.patch(
   "/provider/:id/complete",
   authenticateUser,
-  allowRoles(2),
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
   completeAssignedBooking,
 );
 
-// Admin routes
+router.post(
+  "/provider/:id/reject",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  rejectBookingForProvider,
+);
+
+router.get(
+  "/provider/:id",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  getProviderBookingById,
+);
+
+/*
+|--------------------------------------------------------------------------
+| Admin booking routes
+|--------------------------------------------------------------------------
+*/
+
 router.get(
   "/admin/all",
   authenticateUser,
-  allowRoles(3),
+  allowRoles(ROLE_NAMES.ADMIN),
   getAllBookingsForAdmin,
+);
+
+router.get(
+  "/admin/:id",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.ADMIN),
+  getBookingByIdForAdmin,
 );
 
 router.patch(
   "/admin/:id/assign-provider",
   authenticateUser,
-  allowRoles(3),
+  allowRoles(ROLE_NAMES.ADMIN),
   assignProviderToBooking,
 );
 
-// Keep dynamic route at the bottom
-router.get("/:id", authenticateUser, allowRoles(1), getMyBookingById);
+router.patch(
+  "/admin/:id/cancel",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.ADMIN),
+  cancelBookingForAdmin,
+);
+
+/*
+|--------------------------------------------------------------------------
+| Customer dynamic booking route
+|--------------------------------------------------------------------------
+|
+| Keep this route last so "admin" and "provider" are not interpreted as IDs.
+|--------------------------------------------------------------------------
+*/
+
+router.get(
+  "/:id",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.CUSTOMER),
+  getMyBookingById,
+);
 
 export default router;

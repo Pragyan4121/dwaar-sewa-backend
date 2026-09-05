@@ -1,36 +1,36 @@
 import { Router } from "express";
+
 import {
-  createPaymentForBooking,
-  getAllPaymentsForAdmin,
-  getMyBookingPayment,
-} from "../controllers/payment.controller";
+  getActiveProviders,
+  getMyProviderProfile,
+  getProviderProfile,
+} from "../controllers/provider.controller";
+
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
 
 const router = Router();
 
-// Admin-only route
+/*
+|--------------------------------------------------------------------------
+| Authenticated provider routes
+|--------------------------------------------------------------------------
+*/
+
 router.get(
-  "/admin/all",
+  "/me/profile",
   authenticateUser,
-  allowRoles(3),
-  getAllPaymentsForAdmin,
+  allowRoles("provider"),
+  getMyProviderProfile,
 );
 
-// Customer-only route
-router.get(
-  "/booking/:bookingId",
-  authenticateUser,
-  allowRoles(1),
-  getMyBookingPayment,
-);
+/*
+|--------------------------------------------------------------------------
+| Public provider routes
+|--------------------------------------------------------------------------
+*/
 
-// Admin-only route
-router.post(
-  "/booking/:bookingId",
-  authenticateUser,
-  allowRoles(3),
-  createPaymentForBooking,
-);
+router.get("/", getActiveProviders);
+router.get("/:id", getProviderProfile);
 
 export default router;

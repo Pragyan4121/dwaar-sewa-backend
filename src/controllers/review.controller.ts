@@ -1,6 +1,12 @@
-import { Response } from "express";
+import type { Response } from "express";
 import { prisma } from "../config/prisma";
-import { AuthenticatedRequest } from "../middlewares/auth.middleware";
+import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
+
+/*
+|--------------------------------------------------------------------------
+| Customer: Create review for a completed booking
+|--------------------------------------------------------------------------
+*/
 
 export const createReview = async (
   request: AuthenticatedRequest,
@@ -10,7 +16,7 @@ export const createReview = async (
     const customerId = request.user?.userId;
     const bookingId = Number(request.params.bookingId);
     const rating = Number(request.body.rating);
-    const { comment } = request.body;
+    const comment = request.body.comment;
 
     if (!customerId) {
       return response.status(401).json({
@@ -26,7 +32,23 @@ export const createReview = async (
 
     if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
       return response.status(400).json({
-        message: "Rating must be between 1 and 5",
+        message: "Rating must be a whole number between 1 and 5",
+      });
+    }
+
+    if (
+      comment !== undefined &&
+      comment !== null &&
+      typeof comment !== "string"
+    ) {
+      return response.status(400).json({
+        message: "Comment must be text",
+      });
+    }
+
+    if (typeof comment === "string" && comment.trim().length > 1000) {
+      return response.status(400).json({
+        message: "Comment must not exceed 1000 characters",
       });
     }
 
@@ -34,6 +56,28 @@ export const createReview = async (
       where: {
         id: bookingId,
         customer_id: customerId,
+      },
+      select: {
+        id: true,
+        customer_id: true,
+        provider_id: true,
+        service_id: true,
+        status: true,
+        completed_at: true,
+        services: {
+          select: {
+            id: true,
+            name: true,
+            category_id: true,
+            service_categories: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+              },
+            },
+          },
+        },
       },
     });
 
@@ -51,7 +95,7 @@ export const createReview = async (
 
     if (!booking.provider_id) {
       return response.status(400).json({
-        message: "Provider is missing from this booking",
+        message: "This booking does not have a service provider",
       });
     }
 
@@ -69,11 +113,46 @@ export const createReview = async (
 
     const review = await prisma.reviews.create({
       data: {
-        booking_id: bookingId,
+        booking_id: booking.id,
         customer_id: customerId,
         provider_id: booking.provider_id,
         rating,
-        comment: comment || null,
+        comment:
+          typeof comment === "string" && comment.trim().length > 0
+            ? comment.trim()
+            : null,
+        is_visible: true,
+        updated_at: new Date(),
+      },
+      include: {
+        bookings: {
+          select: {
+            id: true,
+            status: true,
+            completed_at: true,
+            services: {
+              select: {
+                id: true,
+                name: true,
+                category_id: true,
+                service_categories: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        users_reviews_provider_idTousers: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+          },
+        },
       },
     });
 
@@ -89,6 +168,13 @@ export const createReview = async (
     });
   }
 };
+
+/*
+|--------------------------------------------------------------------------
+| Admin: Update review visibility
+|--------------------------------------------------------------------------
+*/
+
 export const updateReviewVisibility = async (
   request: AuthenticatedRequest,
   response: Response,
@@ -145,8 +231,15 @@ export const updateReviewVisibility = async (
     });
   }
 };
+
+/*
+|--------------------------------------------------------------------------
+| Admin: Get all reviews
+|--------------------------------------------------------------------------
+*/
+
 export const getAllReviewsForAdmin = async (
-  request: AuthenticatedRequest,
+  _request: AuthenticatedRequest,
   response: Response,
 ) => {
   try {
@@ -171,6 +264,21 @@ export const getAllReviewsForAdmin = async (
             id: true,
             service_id: true,
             status: true,
+            completed_at: true,
+            services: {
+              select: {
+                id: true,
+                name: true,
+                category_id: true,
+                service_categories: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
           },
         },
       },

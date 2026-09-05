@@ -32,9 +32,15 @@ export const getMyWallet = async (
       });
     }
 
+    const balance = Number(wallet.balance);
+
     return response.status(200).json({
       message: "Wallet fetched successfully",
-      wallet,
+      wallet: {
+        ...wallet,
+        available_balance: Math.max(balance, 0).toFixed(2),
+        amount_owed_to_platform: Math.max(-balance, 0).toFixed(2),
+      },
     });
   } catch (error) {
     console.error("Get wallet error:", error);

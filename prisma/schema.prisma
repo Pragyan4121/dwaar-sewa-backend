@@ -1,36 +1,68 @@
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["partialIndexes"]
+  moduleFormat    = "cjs"
 }
 
 datasource db {
   provider = "postgresql"
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This table contains check constraints and requires additional setup for migrations.
 model bookings {
-  id                                Int       @id @default(autoincrement())
-  customer_id                       Int
-  service_id                        Int
-  provider_id                       Int?
-  service_address                   String
-  service_area                      String    @db.VarChar(100)
-  preferred_date                    DateTime  @db.Date
-  preferred_time                    DateTime? @db.Time(6)
-  notes                             String?
-  status                            String    @default("pending") @db.VarChar(30)
-  estimated_price                   Decimal?  @db.Decimal(10, 2)
-  final_price                       Decimal?  @db.Decimal(10, 2)
-  created_at                        DateTime? @default(now()) @db.Timestamp(6)
-  updated_at                        DateTime? @default(now()) @db.Timestamp(6)
-  users_bookings_customer_idTousers users     @relation("bookings_customer_idTousers", fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_customer")
-  users_bookings_provider_idTousers users?    @relation("bookings_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_provider")
-  services                          services  @relation(fields: [service_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_service")
+  id                      Int       @id @default(autoincrement())
+  customer_id             Int
+  service_id              Int
+  provider_id             Int?
+  service_address         String
+  service_area            String    @db.VarChar(100)
+  preferred_date          DateTime  @db.Date
+  preferred_time          DateTime? @db.Time(6)
+  notes                   String?
+  status                  String    @default("pending") @db.VarChar(30)
+  payment_method          String    @default("cash") @db.VarChar(20)
+  estimated_price         Decimal?  @db.Decimal(10, 2)
+  final_price             Decimal?  @db.Decimal(10, 2)
+  promotion_id            Int?
+  promo_code_snapshot     String?   @db.VarChar(50)
+  discount_amount         Decimal   @default(0.00) @db.Decimal(10, 2)
+  customer_payable_amount Decimal?  @db.Decimal(10, 2)
+  created_at              DateTime? @default(now()) @db.Timestamp(6)
+  updated_at              DateTime? @default(now()) @db.Timestamp(6)
+  accepted_at             DateTime? @db.Timestamp(6)
+  assigned_at             DateTime? @db.Timestamp(6)
+  started_at              DateTime? @db.Timestamp(6)
+  completed_at            DateTime? @db.Timestamp(6)
+  cancelled_at            DateTime? @db.Timestamp(6)
+  cancelled_by            String?   @db.VarChar(20)
+  cancellation_reason     String?
+  customer_address_id     Int?
+
+  booking_status_history            booking_status_history[]
+  users_bookings_customer_idTousers users                    @relation("bookings_customer_idTousers", fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_customer")
+  customer_addresses                customer_addresses?      @relation(fields: [customer_address_id], references: [id], map: "fk_bookings_customer_address")
+  users_bookings_provider_idTousers users?                   @relation("bookings_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_provider")
+  services                          services                 @relation(fields: [service_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_service")
+  promotion                         promotion_campaigns?     @relation(fields: [promotion_id], references: [id], onDelete: SetNull)
+  promotion_redemption              promotion_redemptions?
+  notifications                     notifications[]
   payments                          payments?
   reviews                           reviews?
+  provider_earnings                 provider_earnings?
+  wallet_transactions               wallet_transactions[]
+
+  chat_rooms     chat_rooms?
+  chat_messages  chat_messages[]
+  chat_call_logs chat_call_logs[]
+
+  @@index([customer_id, status, created_at(sort: Desc)], map: "idx_bookings_customer_status_created")
+  @@index([provider_id, status, created_at(sort: Desc)], map: "idx_bookings_provider_status_created")
+  @@index([customer_address_id], map: "idx_bookings_customer_address")
+  @@index([promotion_id], map: "idx_bookings_promotion")
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This table contains check constraints and requires additional setup for migrations.
 model payments {
   id                    Int       @id @default(autoincrement())
   booking_id            Int       @unique
@@ -41,63 +73,165 @@ model payments {
   paid_at               DateTime? @db.Timestamp(6)
   created_at            DateTime? @default(now()) @db.Timestamp(6)
   updated_at            DateTime? @default(now()) @db.Timestamp(6)
-  bookings              bookings  @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payments_booking")
+
+  bookings bookings @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_payments_booking")
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This table contains check constraints and requires additional setup for migrations.
 model reviews {
-  id                               Int       @id @default(autoincrement())
-  booking_id                       Int       @unique
-  customer_id                      Int
-  provider_id                      Int
-  rating                           Int
-  comment                          String?
-  is_visible                       Boolean   @default(true)
-  created_at                       DateTime? @default(now()) @db.Timestamp(6)
-  updated_at                       DateTime? @default(now()) @db.Timestamp(6)
-  bookings                         bookings  @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_booking")
-  users_reviews_customer_idTousers users     @relation("reviews_customer_idTousers", fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_customer")
-  users_reviews_provider_idTousers users     @relation("reviews_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_provider")
+  id          Int       @id @default(autoincrement())
+  booking_id  Int       @unique
+  customer_id Int
+  provider_id Int
+  rating      Int
+  comment     String?
+  is_visible  Boolean   @default(true)
+  created_at  DateTime? @default(now()) @db.Timestamp(6)
+  updated_at  DateTime? @default(now()) @db.Timestamp(6)
+
+  bookings                         bookings @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_booking")
+  users_reviews_customer_idTousers users    @relation("reviews_customer_idTousers", fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_customer")
+  users_reviews_provider_idTousers users    @relation("reviews_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_reviews_provider")
+}
+
+/// Admin-managed promotional campaigns / coupon codes.
+model promotion_campaigns {
+  id                       Int       @id @default(autoincrement())
+  code                     String    @unique @db.VarChar(50)
+  title                    String    @db.VarChar(150)
+  description              String?
+  discount_percent         Decimal   @db.Decimal(5, 2)
+  max_discount_amount      Decimal?  @db.Decimal(10, 2)
+  minimum_order_amount     Decimal?  @db.Decimal(10, 2)
+  is_active                Boolean   @default(true)
+  starts_at                DateTime? @db.Timestamp(6)
+  ends_at                  DateTime? @db.Timestamp(6)
+  first_booking_only       Boolean   @default(false)
+  usage_limit              Int?
+  usage_limit_per_customer Int?      @default(1)
+  show_on_home             Boolean   @default(false)
+  home_badge_text          String?   @db.VarChar(80)
+  created_at               DateTime  @default(now()) @db.Timestamp(6)
+  updated_at               DateTime  @default(now()) @db.Timestamp(6)
+
+  bookings    bookings[]
+  redemptions promotion_redemptions[]
+
+  @@index([is_active, starts_at, ends_at], map: "idx_promotions_active_dates")
+  @@index([show_on_home, is_active], map: "idx_promotions_home_active")
+}
+
+/// Records the actual promotion discount used for a booking.
+model promotion_redemptions {
+  id              Int      @id @default(autoincrement())
+  promotion_id    Int
+  customer_id     Int
+  booking_id      Int      @unique
+  promo_code      String   @db.VarChar(50)
+  gross_amount    Decimal  @db.Decimal(10, 2)
+  discount_amount Decimal  @db.Decimal(10, 2)
+  payable_amount  Decimal  @db.Decimal(10, 2)
+  redeemed_at     DateTime @default(now()) @db.Timestamp(6)
+
+  promotion promotion_campaigns @relation(fields: [promotion_id], references: [id], onDelete: Restrict)
+  customer  users               @relation(fields: [customer_id], references: [id], onDelete: Restrict)
+  booking   bookings            @relation(fields: [booking_id], references: [id], onDelete: Restrict)
+
+  @@index([promotion_id, redeemed_at], map: "idx_promo_redemptions_promotion")
+  @@index([customer_id, promotion_id], map: "idx_promo_redemptions_customer_promotion")
 }
 
 model roles {
   id         Int       @id @default(autoincrement())
   name       String    @unique @db.VarChar(50)
   created_at DateTime? @default(now()) @db.Timestamp(6)
-  users      users[]
+
+  users users[]
 }
 
 model services {
-  id               Int        @id @default(autoincrement())
-  name             String     @unique @db.VarChar(100)
+  id               Int       @id @default(autoincrement())
+  name             String    @unique @db.VarChar(100)
   description      String?
-  base_price       Decimal    @db.Decimal(10, 2)
+  base_price       Decimal   @db.Decimal(10, 2)
   duration_minutes Int?
-  is_active        Boolean?   @default(true)
-  created_at       DateTime?  @default(now()) @db.Timestamp(6)
-  updated_at       DateTime?  @default(now()) @db.Timestamp(6)
-  bookings         bookings[]
+  is_active        Boolean?  @default(true)
+  created_at       DateTime? @default(now()) @db.Timestamp(6)
+  updated_at       DateTime? @default(now()) @db.Timestamp(6)
+  category_id      Int?
+
+  bookings           bookings[]
+  service_categories service_categories? @relation(fields: [category_id], references: [id], onDelete: Restrict, map: "fk_services_category")
+
+  @@index([category_id, is_active], map: "idx_services_category_active")
+  @@index([category_id], map: "idx_services_category_id")
 }
 
 model users {
-  id                                   Int        @id @default(autoincrement())
-  full_name                            String     @db.VarChar(100)
-  phone                                String     @unique @db.VarChar(20)
-  email                                String?    @unique @db.VarChar(150)
-  password_hash                        String
-  role_id                              Int
-  is_active                            Boolean?   @default(true)
-  created_at                           DateTime?  @default(now()) @db.Timestamp(6)
-  updated_at                           DateTime?  @default(now()) @db.Timestamp(6)
-  bookings_bookings_customer_idTousers bookings[] @relation("bookings_customer_idTousers")
-  bookings_bookings_provider_idTousers bookings[] @relation("bookings_provider_idTousers")
-  reviews_reviews_customer_idTousers   reviews[]  @relation("reviews_customer_idTousers")
-  reviews_reviews_provider_idTousers   reviews[]  @relation("reviews_provider_idTousers")
-  roles                                roles      @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_role")
-  wallets                              wallets?
+  id                Int       @id @default(autoincrement())
+  full_name         String    @db.VarChar(100)
+  phone             String    @db.VarChar(20)
+  email             String?   @db.VarChar(150)
+  email_verified_at DateTime? @db.Timestamp(6)
+  password_hash     String
+  role_id           Int
+  is_active         Boolean?  @default(true)
+  created_at        DateTime? @default(now()) @db.Timestamp(6)
+  updated_at        DateTime? @default(now()) @db.Timestamp(6)
+
+  email_otps                                               email_otps[]
+  booking_status_history                                   booking_status_history[]
+  bookings_bookings_customer_idTousers                     bookings[]                      @relation("bookings_customer_idTousers")
+  bookings_bookings_provider_idTousers                     bookings[]                      @relation("bookings_provider_idTousers")
+  customer_addresses                                       customer_addresses?
+  notifications                                            notifications[]
+  provider_documents_provider_documents_provider_idTousers provider_documents[]            @relation("provider_documents_provider_idTousers")
+  provider_documents_provider_documents_reviewed_byTousers provider_documents[]            @relation("provider_documents_reviewed_byTousers")
+  provider_experience_types                                provider_experience_types[]
+  provider_category_experiences                            provider_category_experiences[]
+  provider_profiles_provider_profiles_provider_idTousers   provider_profiles?              @relation("provider_profiles_provider_idTousers")
+  provider_profiles_provider_profiles_verified_byTousers   provider_profiles[]             @relation("provider_profiles_verified_byTousers")
+  reviews_reviews_customer_idTousers                       reviews[]                       @relation("reviews_customer_idTousers")
+  reviews_reviews_provider_idTousers                       reviews[]                       @relation("reviews_provider_idTousers")
+  system_settings                                          system_settings[]
+  roles                                                    roles                           @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_role")
+  wallets                                                  wallets?
+  provider_earnings_provider_idTousers                     provider_earnings[]             @relation("provider_earnings_provider_idTousers")
+  withdrawals_provider_idTousers                           withdrawals[]                   @relation("withdrawals_provider_idTousers")
+  withdrawals_processed_byTousers                          withdrawals[]                   @relation("withdrawals_processed_byTousers")
+  providerCategories                                       provider_categories[]           @relation(map: "fk_provider_categories_provider")
+  promotion_redemptions                                    promotion_redemptions[]
+
+  chat_rooms_chat_rooms_customer_idTousers               chat_rooms[]     @relation("chat_rooms_customer_idTousers")
+  chat_rooms_chat_rooms_provider_idTousers               chat_rooms[]     @relation("chat_rooms_provider_idTousers")
+  chat_messages_chat_messages_sender_user_idTousers      chat_messages[]  @relation("chat_messages_sender_user_idTousers")
+  chat_call_logs_chat_call_logs_initiated_by_idTousers   chat_call_logs[] @relation("chat_call_logs_initiated_by_idTousers")
+  chat_call_logs_chat_call_logs_recipient_user_idTousers chat_call_logs[] @relation("chat_call_logs_recipient_user_idTousers")
+
+  @@unique([phone, role_id], map: "uq_users_phone_role")
+  @@unique([email, role_id], map: "uq_users_email_role")
+  @@index([role_id, is_active], map: "idx_users_role_active")
 }
 
-/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model email_otps {
+  id           Int       @id @default(autoincrement())
+  user_id      Int
+  purpose      String    @db.VarChar(30)
+  code_hash    String    @db.VarChar(255)
+  expires_at   DateTime  @db.Timestamp(6)
+  attempts     Int       @default(0)
+  max_attempts Int       @default(5)
+  consumed_at  DateTime? @db.Timestamp(6)
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  updated_at   DateTime  @default(now()) @db.Timestamp(6)
+
+  users users @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, purpose, created_at(sort: Desc)], map: "idx_email_otps_user_purpose")
+  @@index([expires_at], map: "idx_email_otps_expires_at")
+}
+
+/// Provider wallet.
 model wallets {
   id         Int       @id @default(autoincrement())
   user_id    Int       @unique
@@ -106,5 +240,367 @@ model wallets {
   is_active  Boolean   @default(true)
   created_at DateTime? @default(now()) @db.Timestamp(6)
   updated_at DateTime? @default(now()) @db.Timestamp(6)
-  users      users     @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wallets_user")
+
+  users               users                 @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wallets_user")
+  wallet_transactions wallet_transactions[]
+  withdrawals         withdrawals[]
+
+  @@index([is_active], map: "idx_wallets_active")
+}
+
+/// Earnings created after a provider completes a booking.
+model provider_earnings {
+  id                    Int       @id @default(autoincrement())
+  booking_id            Int       @unique
+  provider_id           Int
+  gross_amount          Decimal   @db.Decimal(12, 2)
+  commission_percentage Decimal   @db.Decimal(5, 2)
+  commission_amount     Decimal   @db.Decimal(12, 2)
+  net_amount            Decimal   @db.Decimal(12, 2)
+  status                String    @default("available") @db.VarChar(30)
+  credited_at           DateTime? @db.Timestamp(6)
+  created_at            DateTime? @default(now()) @db.Timestamp(6)
+  updated_at            DateTime? @default(now()) @db.Timestamp(6)
+
+  bookings bookings @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_provider_earnings_booking")
+  users    users    @relation("provider_earnings_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_provider_earnings_provider")
+
+  @@index([provider_id, status, created_at(sort: Desc)], map: "idx_provider_earnings_provider_status")
+}
+
+/// Credits and debits recorded against a provider wallet.
+model wallet_transactions {
+  id               Int       @id @default(autoincrement())
+  wallet_id        Int
+  booking_id       Int?
+  transaction_type String    @db.VarChar(20)
+  source_type      String    @db.VarChar(30)
+  amount           Decimal   @db.Decimal(12, 2)
+  balance_before   Decimal   @db.Decimal(12, 2)
+  balance_after    Decimal   @db.Decimal(12, 2)
+  description      String?
+  created_at       DateTime? @default(now()) @db.Timestamp(6)
+
+  wallets  wallets   @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wallet_transactions_wallet")
+  bookings bookings? @relation(fields: [booking_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_wallet_transactions_booking")
+
+  @@index([wallet_id, created_at(sort: Desc)], map: "idx_wallet_transactions_wallet_created")
+  @@index([booking_id], map: "idx_wallet_transactions_booking")
+}
+
+/// Provider withdrawal requests.
+model withdrawals {
+  id             Int       @id @default(autoincrement())
+  provider_id    Int
+  wallet_id      Int
+  amount         Decimal   @db.Decimal(12, 2)
+  status         String    @default("pending") @db.VarChar(30)
+  payment_method String    @default("bank_transfer") @db.VarChar(30)
+  account_name   String?   @db.VarChar(150)
+  account_number String?   @db.VarChar(100)
+  bank_name      String?   @db.VarChar(150)
+  provider_note  String?
+  admin_note     String?
+  processed_by   Int?
+  requested_at   DateTime? @default(now()) @db.Timestamp(6)
+  processed_at   DateTime? @db.Timestamp(6)
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+  updated_at     DateTime? @default(now()) @db.Timestamp(6)
+
+  wallets   wallets @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_withdrawals_wallet")
+  provider  users   @relation("withdrawals_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_withdrawals_provider")
+  processor users?  @relation("withdrawals_processed_byTousers", fields: [processed_by], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_withdrawals_processed_by")
+
+  @@index([provider_id, status, requested_at(sort: Desc)], map: "idx_withdrawals_provider_status")
+  @@index([wallet_id], map: "idx_withdrawals_wallet")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model service_categories {
+  id            Int      @id @default(autoincrement())
+  name          String   @unique(map: "service_categories_name_unique") @db.VarChar(100)
+  slug          String   @unique(map: "service_categories_slug_unique") @db.VarChar(120)
+  description   String?
+  image_url     String?
+  is_active     Boolean  @default(true)
+  display_order Int      @default(0)
+  created_at    DateTime @default(now()) @db.Timestamp(6)
+  updated_at    DateTime @default(now()) @db.Timestamp(6)
+
+  category_experience_types     category_experience_types[]
+  services                      services[]
+  providerCategories            provider_categories[]           @relation(map: "fk_provider_categories_category")
+  provider_category_experiences provider_category_experiences[]
+
+  @@index([is_active, display_order], map: "idx_service_categories_active_order")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model booking_status_history {
+  id                 Int      @id @default(autoincrement())
+  booking_id         Int
+  old_status         String?  @db.VarChar(30)
+  new_status         String   @db.VarChar(30)
+  changed_by_user_id Int?
+  changed_by_role    String?  @db.VarChar(20)
+  note               String?
+  created_at         DateTime @default(now()) @db.Timestamp(6)
+
+  bookings bookings @relation(fields: [booking_id], references: [id], onDelete: Cascade, map: "fk_booking_status_history_booking")
+  users    users?   @relation(fields: [changed_by_user_id], references: [id], map: "fk_booking_status_history_user")
+
+  @@index([booking_id, created_at], map: "idx_booking_status_history_booking_created")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model notifications {
+  id                Int       @id @default(autoincrement())
+  user_id           Int
+  booking_id        Int?
+  notification_type String    @db.VarChar(50)
+  title             String    @db.VarChar(150)
+  message           String
+  is_read           Boolean   @default(false)
+  read_at           DateTime? @db.Timestamp(6)
+  created_at        DateTime  @default(now()) @db.Timestamp(6)
+
+  bookings bookings? @relation(fields: [booking_id], references: [id], onDelete: Cascade, map: "fk_notifications_booking")
+  users    users     @relation(fields: [user_id], references: [id], onDelete: Cascade, map: "fk_notifications_user")
+
+  @@index([booking_id], map: "idx_notifications_booking")
+  @@index([user_id, created_at(sort: Desc)], map: "idx_notifications_user_created")
+  @@index([user_id, is_read, created_at(sort: Desc)], map: "idx_notifications_user_unread")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model customer_addresses {
+  id           Int      @id @default(autoincrement())
+  customer_id  Int      @unique(map: "idx_customer_addresses_one_default", where: raw("((is_default = true) AND (is_active = true))"))
+  label        String   @db.VarChar(50)
+  full_address String
+  service_area String   @db.VarChar(100)
+  landmark     String?  @db.VarChar(150)
+  latitude     Decimal? @db.Decimal(10, 7)
+  longitude    Decimal? @db.Decimal(10, 7)
+  is_default   Boolean  @default(false)
+  is_active    Boolean  @default(true)
+  created_at   DateTime @default(now()) @db.Timestamp(6)
+  updated_at   DateTime @default(now()) @db.Timestamp(6)
+
+  bookings bookings[]
+  users    users      @relation(fields: [customer_id], references: [id], onDelete: Cascade, map: "fk_customer_addresses_customer")
+
+  @@index([customer_id, is_active], map: "idx_customer_addresses_customer_active")
+  @@index([customer_id, is_default], map: "idx_customer_addresses_customer_default")
+}
+
+model category_experience_types {
+  id                 Int      @id @default(autoincrement())
+  category_id        Int
+  experience_type_id Int
+  created_at         DateTime @default(now()) @db.Timestamp(6)
+
+  service_categories service_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, map: "fk_category_experience_category")
+  experience_types   experience_types   @relation(fields: [experience_type_id], references: [id], onDelete: Cascade, map: "fk_category_experience_type")
+
+  @@unique([category_id, experience_type_id], map: "uq_category_experience_type")
+  @@index([category_id], map: "idx_category_experience_category")
+  @@index([experience_type_id], map: "idx_category_experience_type")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model experience_types {
+  id            Int      @id @default(autoincrement())
+  name          String   @unique(map: "uq_experience_types_name") @db.VarChar(100)
+  slug          String   @unique(map: "uq_experience_types_slug") @db.VarChar(120)
+  description   String?
+  is_active     Boolean  @default(true)
+  display_order Int      @default(0)
+  created_at    DateTime @default(now()) @db.Timestamp(6)
+  updated_at    DateTime @default(now()) @db.Timestamp(6)
+
+  category_experience_types     category_experience_types[]
+  provider_experience_types     provider_experience_types[]
+  provider_category_experiences provider_category_experiences[]
+
+  @@index([is_active, display_order], map: "idx_experience_types_active_order")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model provider_documents {
+  id                  Int       @id @default(autoincrement())
+  provider_id         Int
+  document_type       String    @db.VarChar(50)
+  document_number     String?   @db.VarChar(100)
+  file_url            String
+  verification_status String    @default("pending") @db.VarChar(30)
+  rejection_reason    String?
+  reviewed_at         DateTime? @db.Timestamp(6)
+  reviewed_by         Int?
+  created_at          DateTime  @default(now()) @db.Timestamp(6)
+  updated_at          DateTime  @default(now()) @db.Timestamp(6)
+
+  users_provider_documents_provider_idTousers users  @relation("provider_documents_provider_idTousers", fields: [provider_id], references: [id], onDelete: Cascade, map: "fk_provider_documents_provider")
+  users_provider_documents_reviewed_byTousers users? @relation("provider_documents_reviewed_byTousers", fields: [reviewed_by], references: [id], map: "fk_provider_documents_reviewed_by")
+
+  @@index([provider_id], map: "idx_provider_documents_provider")
+  @@index([verification_status], map: "idx_provider_documents_status")
+}
+
+model provider_category_experiences {
+  id                 Int      @id @default(autoincrement())
+  provider_id        Int
+  category_id        Int
+  experience_type_id Int
+  created_at         DateTime @default(now()) @db.Timestamp(6)
+  updated_at         DateTime @default(now()) @db.Timestamp(6)
+
+  users              users              @relation(fields: [provider_id], references: [id], onDelete: Cascade, map: "fk_provider_category_experience_provider")
+  service_categories service_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, map: "fk_provider_category_experience_category")
+  experience_types   experience_types   @relation(fields: [experience_type_id], references: [id], onDelete: Cascade, map: "fk_provider_category_experience_type")
+
+  @@unique([provider_id, category_id], map: "uq_provider_category_experience")
+  @@index([provider_id], map: "idx_provider_category_experience_provider")
+  @@index([category_id], map: "idx_provider_category_experience_category")
+  @@index([experience_type_id], map: "idx_provider_category_experience_type")
+}
+
+model provider_experience_types {
+  id                 Int      @id @default(autoincrement())
+  provider_id        Int
+  experience_type_id Int
+  created_at         DateTime @default(now()) @db.Timestamp(6)
+
+  users            users            @relation(fields: [provider_id], references: [id], onDelete: Cascade, map: "fk_provider_experience_provider")
+  experience_types experience_types @relation(fields: [experience_type_id], references: [id], onDelete: Cascade, map: "fk_provider_experience_type")
+
+  @@unique([provider_id, experience_type_id], map: "uq_provider_experience_type")
+  @@index([provider_id], map: "idx_provider_experience_provider")
+  @@index([experience_type_id], map: "idx_provider_experience_type")
+}
+
+model provider_categories {
+  id          Int      @id @default(autoincrement())
+  provider_id Int
+  category_id Int
+  created_at  DateTime @default(now()) @db.Timestamp(6)
+
+  users              users              @relation(fields: [provider_id], references: [id], onDelete: Cascade, map: "fk_provider_categories_provider")
+  service_categories service_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, map: "fk_provider_categories_category")
+
+  @@unique([provider_id, category_id], map: "uq_provider_category")
+  @@index([provider_id], map: "idx_provider_categories_provider")
+  @@index([category_id], map: "idx_provider_categories_category")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model provider_profiles {
+  id                   Int       @id @default(autoincrement())
+  provider_id          Int       @unique(map: "uq_provider_profiles_provider")
+  address              String?
+  profile_photo_url    String?
+  years_of_experience  Int       @default(0)
+  bio                  String?
+  verification_status  String    @default("pending") @db.VarChar(30)
+  verification_note    String?
+  verified_at          DateTime? @db.Timestamp(6)
+  verified_by          Int?
+  suspended_at         DateTime? @db.Timestamp(6)
+  rejection_reason     String?
+  average_rating       Decimal   @default(0) @db.Decimal(3, 2)
+  total_reviews        Int       @default(0)
+  total_completed_jobs Int       @default(0)
+  is_available         Boolean   @default(false)
+  created_at           DateTime  @default(now()) @db.Timestamp(6)
+  updated_at           DateTime  @default(now()) @db.Timestamp(6)
+
+  users_provider_profiles_provider_idTousers users  @relation("provider_profiles_provider_idTousers", fields: [provider_id], references: [id], onDelete: Cascade, map: "fk_provider_profiles_provider")
+  users_provider_profiles_verified_byTousers users? @relation("provider_profiles_verified_byTousers", fields: [verified_by], references: [id], map: "fk_provider_profiles_verified_by")
+
+  @@index([average_rating(sort: Desc)], map: "idx_provider_profiles_rating")
+  @@index([verification_status], map: "idx_provider_profiles_status")
+  @@index([is_available], map: "idx_provider_profiles_available")
+}
+
+/// This table contains check constraints and requires additional setup for migrations.
+model system_settings {
+  id            Int      @id @default(autoincrement())
+  setting_key   String   @unique(map: "uq_system_settings_key") @db.VarChar(100)
+  setting_value String?
+  value_type    String   @default("string") @db.VarChar(20)
+  description   String?
+  is_public     Boolean  @default(false)
+  updated_by    Int?
+  created_at    DateTime @default(now()) @db.Timestamp(6)
+  updated_at    DateTime @default(now()) @db.Timestamp(6)
+
+  users users? @relation(fields: [updated_by], references: [id], map: "fk_system_settings_updated_by")
+
+  @@index([is_public], map: "idx_system_settings_public")
+}
+
+/// One isolated chat room for one accepted booking.
+model chat_rooms {
+  id           Int       @id @default(autoincrement())
+  booking_id   Int       @unique
+  customer_id  Int
+  provider_id  Int
+  activated_at DateTime  @default(now()) @db.Timestamp(6)
+  archived_at  DateTime? @db.Timestamp(6)
+  created_at   DateTime  @default(now()) @db.Timestamp(6)
+  updated_at   DateTime  @default(now()) @db.Timestamp(6)
+
+  bookings                            bookings         @relation(fields: [booking_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_chat_rooms_booking")
+  users_chat_rooms_customer_idTousers users            @relation("chat_rooms_customer_idTousers", fields: [customer_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chat_rooms_customer")
+  users_chat_rooms_provider_idTousers users            @relation("chat_rooms_provider_idTousers", fields: [provider_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chat_rooms_provider")
+  chat_messages                       chat_messages[]
+  chat_call_logs                      chat_call_logs[]
+
+  @@index([customer_id, archived_at, updated_at(sort: Desc)], map: "idx_chat_rooms_customer_active")
+  @@index([provider_id, archived_at, updated_at(sort: Desc)], map: "idx_chat_rooms_provider_active")
+}
+
+model chat_messages {
+  id             Int       @id @default(autoincrement())
+  chat_room_id   Int
+  booking_id     Int
+  sender_user_id Int?
+  sender_role    String    @db.VarChar(20)
+  message_type   String    @default("text") @db.VarChar(20)
+  message_text   String?
+  image_url      String?
+  delivered_at   DateTime? @db.Timestamp(6)
+  read_at        DateTime? @db.Timestamp(6)
+  created_at     DateTime  @default(now()) @db.Timestamp(6)
+
+  chat_rooms                                chat_rooms @relation(fields: [chat_room_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_chat_messages_room")
+  bookings                                  bookings   @relation(fields: [booking_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_chat_messages_booking")
+  users_chat_messages_sender_user_idTousers users?     @relation("chat_messages_sender_user_idTousers", fields: [sender_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction, map: "fk_chat_messages_sender")
+
+  @@index([chat_room_id, created_at], map: "idx_chat_messages_room_created")
+  @@index([booking_id, created_at], map: "idx_chat_messages_booking_created")
+  @@index([sender_user_id], map: "idx_chat_messages_sender")
+  @@index([chat_room_id, read_at], map: "idx_chat_messages_room_unread")
+}
+
+model chat_call_logs {
+  id                Int       @id @default(autoincrement())
+  chat_room_id      Int
+  booking_id        Int
+  initiated_by_id   Int
+  recipient_user_id Int
+  call_type         String    @default("voice") @db.VarChar(20)
+  status            String    @default("initiated") @db.VarChar(30)
+  started_at        DateTime  @default(now()) @db.Timestamp(6)
+  ended_at          DateTime? @db.Timestamp(6)
+  duration_seconds  Int?
+  created_at        DateTime  @default(now()) @db.Timestamp(6)
+
+  chat_rooms                                    chat_rooms @relation(fields: [chat_room_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_chat_call_logs_room")
+  bookings                                      bookings   @relation(fields: [booking_id], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_chat_call_logs_booking")
+  users_chat_call_logs_initiated_by_idTousers   users      @relation("chat_call_logs_initiated_by_idTousers", fields: [initiated_by_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chat_call_logs_initiator")
+  users_chat_call_logs_recipient_user_idTousers users      @relation("chat_call_logs_recipient_user_idTousers", fields: [recipient_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_chat_call_logs_recipient")
+
+  @@index([chat_room_id, started_at(sort: Desc)], map: "idx_chat_call_logs_room_started")
+  @@index([booking_id, started_at(sort: Desc)], map: "idx_chat_call_logs_booking_started")
 }

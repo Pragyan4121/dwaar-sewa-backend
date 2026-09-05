@@ -1,38 +1,59 @@
 import { Router } from "express";
+
+import { ROLE_NAMES } from "../constants/roles";
+import { getProviderReviews } from "../controllers/provider-review.controller";
 import {
   createReview,
-  updateReviewVisibility,
   getAllReviewsForAdmin,
+  updateReviewVisibility,
 } from "../controllers/review.controller";
-import { getProviderReviews } from "../controllers/provider-review.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
 
 const router = Router();
 
-// Public route
+/*
+|--------------------------------------------------------------------------
+| Public review routes
+|--------------------------------------------------------------------------
+*/
+
+// Get public reviews for one provider
 router.get("/provider/:providerId", getProviderReviews);
 
-// Customer-only route
+/*
+|--------------------------------------------------------------------------
+| Customer review routes
+|--------------------------------------------------------------------------
+*/
+
+// Customer creates a review for a completed booking
 router.post(
   "/booking/:bookingId",
   authenticateUser,
-  allowRoles(1),
+  allowRoles(ROLE_NAMES.CUSTOMER),
   createReview,
 );
 
-// Admin-only routes
+/*
+|--------------------------------------------------------------------------
+| Admin review routes
+|--------------------------------------------------------------------------
+*/
+
+// Get all reviews
 router.get(
   "/admin/all",
   authenticateUser,
-  allowRoles(3),
+  allowRoles(ROLE_NAMES.ADMIN),
   getAllReviewsForAdmin,
 );
 
+// Show or hide a review
 router.patch(
   "/admin/:id/visibility",
   authenticateUser,
-  allowRoles(3),
+  allowRoles(ROLE_NAMES.ADMIN),
   updateReviewVisibility,
 );
 
