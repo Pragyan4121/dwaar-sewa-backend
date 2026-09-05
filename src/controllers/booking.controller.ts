@@ -266,6 +266,7 @@ export const createBooking = async (
       id: number;
       code: string;
       discountPercent: number;
+      maxDiscountAmount: number | null;
       discountAmount: number;
       payableAmount: number;
     } | null = null;
@@ -396,6 +397,10 @@ export const createBooking = async (
         id: promotion.id,
         code: promotion.code,
         discountPercent,
+        maxDiscountAmount:
+          promotion.max_discount_amount === null
+            ? null
+            : Number(promotion.max_discount_amount),
         discountAmount,
         payableAmount,
       };
@@ -408,6 +413,94 @@ export const createBooking = async (
     */
 
     const booking = await prisma.$transaction(async (transaction) => {
+      /*
+  |--------------------------------------------------------------------------
+  | Lock and revalidate promotion usage atomically
+  |--------------------------------------------------------------------------
+  |
+  | Locking the promotion row makes promo redemptions for the same promo
+  | execute one at a time. This prevents two customers from both taking
+  | the final available redemption.
+  |--------------------------------------------------------------------------
+  */
+
+      if (selectedPromotion) {
+        await transaction.$queryRaw<Array<{ id: number }>>`
+      SELECT id
+      FROM promotion_campaigns
+      WHERE id = ${selectedPromotion.id}
+      FOR UPDATE
+    `;
+
+        const lockedPromotion =
+          await transaction.promotion_campaigns.findUnique({
+            where: {
+              id: selectedPromotion.id,
+            },
+            select: {
+              id: true,
+              usage_limit: true,
+              usage_limit_per_customer: true,
+              first_booking_only: true,
+            },
+          });
+
+        if (!lockedPromotion) {
+          throw new Error("PROMO_NOT_FOUND");
+        }
+
+        if (lockedPromotion.usage_limit !== null) {
+          const totalUsage = await transaction.promotion_redemptions.count({
+            where: {
+              promotion_id: selectedPromotion.id,
+            },
+          });
+
+          if (totalUsage >= lockedPromotion.usage_limit) {
+            throw new Error("PROMO_USAGE_LIMIT_REACHED");
+          }
+        }
+
+        if (lockedPromotion.usage_limit_per_customer !== null) {
+          const customerUsage = await transaction.promotion_redemptions.count({
+            where: {
+              promotion_id: selectedPromotion.id,
+              customer_id: customerId,
+            },
+          });
+
+          if (customerUsage >= lockedPromotion.usage_limit_per_customer) {
+            throw new Error("PROMO_CUSTOMER_LIMIT_REACHED");
+          }
+        }
+
+        if (lockedPromotion.first_booking_only) {
+          /*
+           * Also lock the customer row so two simultaneous "first booking"
+           * requests for this customer cannot both succeed.
+           */
+          await transaction.$queryRaw<Array<{ id: number }>>`
+        SELECT id
+        FROM users
+        WHERE id = ${customerId}
+        FOR UPDATE
+      `;
+
+          const previousBookingCount = await transaction.bookings.count({
+            where: {
+              customer_id: customerId,
+              NOT: {
+                status: "cancelled",
+              },
+            },
+          });
+
+          if (previousBookingCount > 0) {
+            throw new Error("PROMO_FIRST_BOOKING_ONLY");
+          }
+        }
+      }
+
       const createdBooking = await transaction.bookings.create({
         data: {
           customer_id: customerId,
@@ -429,8 +522,17 @@ export const createBooking = async (
           final_price: null,
 
           promotion_id: selectedPromotion?.id ?? null,
+
           promo_code_snapshot: selectedPromotion?.code ?? null,
+
+          promo_discount_percent_snapshot:
+            selectedPromotion?.discountPercent ?? null,
+
+          promo_max_discount_snapshot:
+            selectedPromotion?.maxDiscountAmount ?? null,
+
           discount_amount: selectedPromotion?.discountAmount ?? 0,
+
           customer_payable_amount:
             selectedPromotion?.payableAmount ?? service.base_price,
 
@@ -532,6 +634,36 @@ export const createBooking = async (
     });
   } catch (error) {
     console.error("Create booking error:", error);
+
+    if (error instanceof Error) {
+      if (error.message === "PROMO_NOT_FOUND") {
+        return response.status(400).json({
+          message: "Promotion is no longer available",
+          code: "PROMO_NOT_FOUND",
+        });
+      }
+
+      if (error.message === "PROMO_USAGE_LIMIT_REACHED") {
+        return response.status(400).json({
+          message: "This promo code has reached its usage limit",
+          code: "PROMO_USAGE_LIMIT_REACHED",
+        });
+      }
+
+      if (error.message === "PROMO_CUSTOMER_LIMIT_REACHED") {
+        return response.status(400).json({
+          message: "You have already used this promo code",
+          code: "PROMO_CUSTOMER_LIMIT_REACHED",
+        });
+      }
+
+      if (error.message === "PROMO_FIRST_BOOKING_ONLY") {
+        return response.status(400).json({
+          message: "This promo code is available only for your first booking",
+          code: "PROMO_FIRST_BOOKING_ONLY",
+        });
+      }
+    }
 
     return response.status(500).json({
       message: "Unable to create booking",
@@ -809,55 +941,62 @@ export const cancelMyBooking = async (
       });
     }
 
-    const cancelledBooking = await prisma.bookings.update({
-      where: {
-        id: bookingId,
-      },
-      data: {
-        status: "cancelled",
-        cancelled_at: new Date(),
-        cancelled_by: "customer",
-        cancellation_reason:
-          typeof cancellationReason === "string" &&
-          cancellationReason.trim().length > 0
-            ? cancellationReason.trim()
-            : null,
-        updated_at: new Date(),
-      },
-      include: {
-        services: {
-          select: {
-            id: true,
-            name: true,
-            category_id: true,
-            service_categories: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
+    const cancelledBooking = await prisma.$transaction(async (transaction) => {
+      const updatedBooking = await transaction.bookings.update({
+        where: {
+          id: bookingId,
+        },
+        data: {
+          status: "cancelled",
+          cancelled_at: new Date(),
+          cancelled_by: "customer",
+          cancellation_reason:
+            typeof cancellationReason === "string" &&
+            cancellationReason.trim().length > 0
+              ? cancellationReason.trim()
+              : null,
+          updated_at: new Date(),
+        },
+        include: {
+          services: {
+            select: {
+              id: true,
+              name: true,
+              category_id: true,
+              service_categories: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
               },
             },
           },
         },
-      },
-    });
-    await recordBookingStatusHistory({
-      bookingId: cancelledBooking.id,
-      oldStatus: booking.status as
-        | "pending"
-        | "accepted"
-        | "assigned"
-        | "in_progress"
-        | "completed"
-        | "cancelled",
-      newStatus: "cancelled",
-      changedByUserId: customerId,
-      changedByRole: "customer",
-      note:
-        typeof cancellationReason === "string" &&
-        cancellationReason.trim().length > 0
-          ? cancellationReason.trim()
-          : "Booking cancelled by customer.",
+      });
+
+      await transaction.promotion_redemptions.deleteMany({
+        where: {
+          booking_id: bookingId,
+        },
+      });
+
+      await transaction.booking_status_history.create({
+        data: {
+          booking_id: bookingId,
+          old_status: booking.status,
+          new_status: "cancelled",
+          changed_by_user_id: customerId,
+          changed_by_role: "customer",
+          note:
+            typeof cancellationReason === "string" &&
+            cancellationReason.trim().length > 0
+              ? cancellationReason.trim()
+              : "Booking cancelled by customer.",
+        },
+      });
+
+      return updatedBooking;
     });
 
     await createNotification({
@@ -1250,6 +1389,9 @@ export const completeAssignedBooking = async (
         status: true,
         payment_method: true,
         discount_amount: true,
+        promo_discount_percent_snapshot: true,
+        promo_max_discount_snapshot: true,
+        promotion_id: true,
       },
     });
 
@@ -1278,14 +1420,21 @@ export const completeAssignedBooking = async (
         where: {
           setting_key: "provider_commission_percent",
         },
-        select: {
-          setting_value: true,
-        },
       });
 
-      const commissionPercentage = Number(
-        commissionSetting?.setting_value ?? "5",
-      );
+      if (!commissionSetting) {
+        throw new Error("PROVIDER_COMMISSION_SETTING_MISSING");
+      }
+
+      const commissionPercentage = Number(commissionSetting.setting_value);
+
+      if (
+        !Number.isFinite(commissionPercentage) ||
+        commissionPercentage < 0 ||
+        commissionPercentage > 100
+      ) {
+        throw new Error("PROVIDER_COMMISSION_SETTING_INVALID");
+      }
 
       if (
         !Number.isFinite(commissionPercentage) ||
@@ -1304,15 +1453,36 @@ export const completeAssignedBooking = async (
       */
 
       const roundedFinalPrice = Math.round(finalPrice * 100) / 100;
-      const existingDiscountAmount = Math.max(
-        0,
-        Math.round(Number(booking.discount_amount ?? 0) * 100) / 100,
-      );
 
-      const appliedDiscountAmount = Math.min(
-        existingDiscountAmount,
-        roundedFinalPrice,
-      );
+      let appliedDiscountAmount = 0;
+
+      if (
+        booking.promotion_id !== null &&
+        booking.promo_discount_percent_snapshot !== null
+      ) {
+        const promoDiscountPercent = Math.max(
+          0,
+          Number(booking.promo_discount_percent_snapshot),
+        );
+
+        appliedDiscountAmount =
+          Math.round(((roundedFinalPrice * promoDiscountPercent) / 100) * 100) /
+          100;
+
+        if (booking.promo_max_discount_snapshot !== null) {
+          appliedDiscountAmount = Math.min(
+            appliedDiscountAmount,
+            Number(booking.promo_max_discount_snapshot),
+          );
+        }
+
+        appliedDiscountAmount = Math.min(
+          appliedDiscountAmount,
+          roundedFinalPrice,
+        );
+
+        appliedDiscountAmount = Math.round(appliedDiscountAmount * 100) / 100;
+      }
 
       const customerPayableAmount =
         Math.round(
@@ -1616,27 +1786,26 @@ export const completeAssignedBooking = async (
       error.message === "BOOKING_ALREADY_COMPLETED_OR_CHANGED"
     ) {
       return response.status(409).json({
-        message: "Booking has already been completed or its status has changed",
+        message: "Booking has already been completed or changed.",
       });
     }
 
-    if (
-      error instanceof Error &&
-      error.message === "PROVIDER_WALLET_INACTIVE"
-    ) {
-      return response.status(403).json({
-        message: "Your provider wallet is inactive. Please contact support.",
-      });
-    }
+    if (error instanceof Error) {
+      if (error.message === "PROVIDER_COMMISSION_SETTING_MISSING") {
+        return response.status(500).json({
+          message:
+            "Provider commission is not configured. Please configure it in Admin Settings.",
+          code: "PROVIDER_COMMISSION_SETTING_MISSING",
+        });
+      }
 
-    if (
-      error instanceof Error &&
-      error.message.includes("provider commission percentage")
-    ) {
-      return response.status(500).json({
-        message:
-          "Provider commission setting is invalid. Please contact the administrator.",
-      });
+      if (error.message === "PROVIDER_COMMISSION_SETTING_INVALID") {
+        return response.status(500).json({
+          message:
+            "Provider commission setting is invalid. Please correct it in Admin Settings.",
+          code: "PROVIDER_COMMISSION_SETTING_INVALID",
+        });
+      }
     }
 
     return response.status(500).json({
