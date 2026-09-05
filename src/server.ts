@@ -56,6 +56,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:8081",
   "https://dwaar-sewa-admin.onrender.com",
+  "https://dwaar-sewa-app.onrender.com",
 ];
 
 app.use(
