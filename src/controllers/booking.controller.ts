@@ -1313,9 +1313,10 @@ export const startAssignedBooking = async (
       });
     }
 
-    if (booking.status !== "assigned" && booking.status !== "accepted") {
+    if (booking.status !== "arrived") {
       return response.status(400).json({
-        message: `Booking cannot be started because its status is ${booking.status}`,
+        message: `Booking cannot be started because its status is ${booking.status}. Provider must arrive at the service location first.`,
+        code: "BOOKING_NOT_ARRIVED",
       });
     }
 
