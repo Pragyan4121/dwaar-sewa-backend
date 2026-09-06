@@ -97,13 +97,69 @@ export const createProviderWithdrawal = async (
         throw new Error("WALLET_INACTIVE");
       }
 
-      const balanceBefore = Math.round(Number(wallet.balance) * 100) / 100;
+      /*
+      |--------------------------------------------------------------------------
+      | Atomically reserve withdrawal amount
+      |--------------------------------------------------------------------------
+      |
+      | The balance condition and decrement happen in the same database query.
+      | This prevents two simultaneous withdrawals from spending the same
+      | wallet balance.
+      |
+      |--------------------------------------------------------------------------
+      */
 
-      if (amount > balanceBefore) {
+      const walletUpdateResult = await transaction.wallets.updateMany({
+        where: {
+          id: wallet.id,
+          is_active: true,
+          balance: {
+            gte: amount,
+          },
+        },
+        data: {
+          balance: {
+            decrement: amount,
+          },
+          updated_at: now,
+        },
+      });
+
+      if (walletUpdateResult.count !== 1) {
         throw new Error("INSUFFICIENT_WALLET_BALANCE");
       }
 
-      const balanceAfter = Math.round((balanceBefore - amount) * 100) / 100;
+      /*
+      |--------------------------------------------------------------------------
+      | Read balance after atomic debit
+      |--------------------------------------------------------------------------
+      */
+
+      const updatedWallet = await transaction.wallets.findUnique({
+        where: {
+          id: wallet.id,
+        },
+        select: {
+          id: true,
+          balance: true,
+          currency: true,
+          is_active: true,
+        },
+      });
+
+      if (!updatedWallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const balanceAfter =
+        Math.round(Number(updatedWallet.balance) * 100) / 100;
+      const balanceBefore = Math.round((balanceAfter + amount) * 100) / 100;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Create withdrawal request
+      |--------------------------------------------------------------------------
+      */
 
       const withdrawal = await transaction.withdrawals.create({
         data: {
@@ -122,15 +178,11 @@ export const createProviderWithdrawal = async (
         },
       });
 
-      const updatedWallet = await transaction.wallets.update({
-        where: {
-          id: wallet.id,
-        },
-        data: {
-          balance: balanceAfter.toFixed(2),
-          updated_at: now,
-        },
-      });
+      /*
+      |--------------------------------------------------------------------------
+      | Record wallet transaction
+      |--------------------------------------------------------------------------
+      */
 
       const walletTransaction = await transaction.wallet_transactions.create({
         data: {

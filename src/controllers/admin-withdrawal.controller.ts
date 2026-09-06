@@ -474,7 +474,6 @@ export const rejectWithdrawalForAdmin = async (
             in: ["pending", "approved"],
           },
         },
-
         select: {
           id: true,
           provider_id: true,
@@ -488,34 +487,17 @@ export const rejectWithdrawalForAdmin = async (
         throw new Error("WITHDRAWAL_NOT_REJECTABLE");
       }
 
-      const wallet = await transaction.wallets.findUnique({
-        where: {
-          id: withdrawal.wallet_id,
-        },
-
-        select: {
-          id: true,
-          balance: true,
-          currency: true,
-        },
-      });
-
-      if (!wallet) {
-        throw new Error("WALLET_NOT_FOUND");
-      }
-
-      const amount = Number(withdrawal.amount);
-
-      const balanceBefore = Math.round(Number(wallet.balance) * 100) / 100;
-
-      const balanceAfter = Math.round((balanceBefore + amount) * 100) / 100;
+      /*
+      |--------------------------------------------------------------------------
+      | Claim withdrawal for rejection
+      |--------------------------------------------------------------------------
+      */
 
       const updateResult = await transaction.withdrawals.updateMany({
         where: {
           id: withdrawalId,
           status: withdrawal.status,
         },
-
         data: {
           status: "rejected",
           admin_note: adminNote,
@@ -529,16 +511,64 @@ export const rejectWithdrawalForAdmin = async (
         throw new Error("WITHDRAWAL_NOT_REJECTABLE");
       }
 
+      /*
+      |--------------------------------------------------------------------------
+      | Get wallet
+      |--------------------------------------------------------------------------
+      */
+
+      const wallet = await transaction.wallets.findUnique({
+        where: {
+          id: withdrawal.wallet_id,
+        },
+        select: {
+          id: true,
+          balance: true,
+          currency: true,
+          is_active: true,
+        },
+      });
+
+      if (!wallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const amount = Math.round(Number(withdrawal.amount) * 100) / 100;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Atomically restore withdrawal amount
+      |--------------------------------------------------------------------------
+      */
+
       const updatedWallet = await transaction.wallets.update({
         where: {
           id: wallet.id,
         },
-
         data: {
-          balance: balanceAfter.toFixed(2),
+          balance: {
+            increment: amount,
+          },
           updated_at: now,
         },
+        select: {
+          id: true,
+          balance: true,
+          currency: true,
+          is_active: true,
+        },
       });
+
+      const balanceAfter =
+        Math.round(Number(updatedWallet.balance) * 100) / 100;
+
+      const balanceBefore = Math.round((balanceAfter - amount) * 100) / 100;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Record wallet refund transaction
+      |--------------------------------------------------------------------------
+      */
 
       const walletTransaction = await transaction.wallet_transactions.create({
         data: {
@@ -553,6 +583,12 @@ export const rejectWithdrawalForAdmin = async (
           created_at: now,
         },
       });
+
+      /*
+      |--------------------------------------------------------------------------
+      | Return updated withdrawal
+      |--------------------------------------------------------------------------
+      */
 
       const rejectedWithdrawal = await transaction.withdrawals.findUnique({
         where: {
