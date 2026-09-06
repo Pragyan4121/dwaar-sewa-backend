@@ -566,7 +566,6 @@ export const getCashCommissionDueForAdmin = async (
     });
   }
 };
-
 export const updatePaymentStatusForAdmin = async (
   request: AuthenticatedRequest,
   response: Response,
@@ -595,6 +594,15 @@ export const updatePaymentStatusForAdmin = async (
       where: {
         id: paymentId,
       },
+      include: {
+        bookings: {
+          select: {
+            id: true,
+            provider_id: true,
+            status: true,
+          },
+        },
+      },
     });
 
     if (!existingPayment) {
@@ -609,9 +617,325 @@ export const updatePaymentStatusForAdmin = async (
       });
     }
 
-    if (status === "refunded" && existingPayment.payment_status !== "paid") {
+    /*
+    |--------------------------------------------------------------------------
+    | Protect financially settled payments
+    |--------------------------------------------------------------------------
+    |
+    | Booking completion already performs the complete settlement:
+    | payment + provider earning + commission + wallet transaction.
+    |
+    | Therefore this generic admin endpoint must NOT manually turn an
+    | unsettled payment into "paid", because doing so would bypass commission
+    | and provider wallet settlement.
+    |
+    |--------------------------------------------------------------------------
+    */
+
+    if (status === "paid") {
       return response.status(400).json({
-        message: "Only a paid payment can be marked as refunded",
+        message:
+          "Payments cannot be manually marked as paid. A payment becomes paid automatically when the booking settlement is completed.",
+      });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Paid payments can only move to refunded
+    |--------------------------------------------------------------------------
+    */
+
+    if (existingPayment.payment_status === "paid" && status !== "refunded") {
+      return response.status(400).json({
+        message: "A paid payment can only be changed to refunded.",
+      });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Refunded payments are final
+    |--------------------------------------------------------------------------
+    */
+
+    if (existingPayment.payment_status === "refunded") {
+      return response.status(400).json({
+        message: "A refunded payment cannot be changed again.",
+      });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Refund settlement
+    |--------------------------------------------------------------------------
+    */
+
+    if (status === "refunded") {
+      if (existingPayment.payment_status !== "paid") {
+        return response.status(400).json({
+          message: "Only a paid payment can be refunded.",
+        });
+      }
+
+      const bookingId = existingPayment.booking_id;
+      const providerId = existingPayment.bookings.provider_id;
+
+      if (!providerId) {
+        return response.status(400).json({
+          message:
+            "This payment cannot be refunded because the booking has no assigned provider.",
+        });
+      }
+
+      const result = await prisma.$transaction(async (transaction) => {
+        /*
+        |--------------------------------------------------------------------------
+        | Prevent duplicate refund processing
+        |--------------------------------------------------------------------------
+        */
+
+        const paymentUpdateResult = await transaction.payments.updateMany({
+          where: {
+            id: paymentId,
+            payment_status: "paid",
+          },
+          data: {
+            payment_status: "refunded",
+            updated_at: new Date(),
+          },
+        });
+
+        if (paymentUpdateResult.count !== 1) {
+          throw new Error("PAYMENT_ALREADY_CHANGED");
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Find the provider earning created by booking completion
+        |--------------------------------------------------------------------------
+        */
+
+        const earning = await transaction.provider_earnings.findUnique({
+          where: {
+            booking_id: bookingId,
+          },
+        });
+
+        if (!earning) {
+          throw new Error("PROVIDER_EARNING_NOT_FOUND");
+        }
+
+        if (earning.status === "refunded") {
+          throw new Error("EARNING_ALREADY_REFUNDED");
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Find original booking wallet settlement
+        |--------------------------------------------------------------------------
+        |
+        | We reverse the exact recorded transaction instead of recalculating
+        | commission using today's settings.
+        |
+        |--------------------------------------------------------------------------
+        */
+
+        const originalWalletTransaction =
+          await transaction.wallet_transactions.findFirst({
+            where: {
+              booking_id: bookingId,
+              source_type: {
+                in: [
+                  "booking_earning",
+                  "cash_commission_due",
+                  "cash_booking_adjustment",
+                ],
+              },
+            },
+            orderBy: {
+              id: "asc",
+            },
+          });
+
+        if (!originalWalletTransaction) {
+          throw new Error("ORIGINAL_WALLET_TRANSACTION_NOT_FOUND");
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Prevent duplicate wallet reversal
+        |--------------------------------------------------------------------------
+        */
+
+        const existingRefundReversal =
+          await transaction.wallet_transactions.findFirst({
+            where: {
+              booking_id: bookingId,
+              source_type: "refund_reversal",
+            },
+          });
+
+        if (existingRefundReversal) {
+          throw new Error("REFUND_ALREADY_REVERSED");
+        }
+
+        const originalAmount =
+          Math.round(Number(originalWalletTransaction.amount) * 100) / 100;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Calculate exact opposite movement
+        |--------------------------------------------------------------------------
+        |
+        | Original credit  -> refund debit
+        | Original debit   -> refund credit
+        |
+        |--------------------------------------------------------------------------
+        */
+
+        const reversalTransactionType =
+          originalWalletTransaction.transaction_type === "credit"
+            ? "debit"
+            : "credit";
+
+        const reversalDelta =
+          reversalTransactionType === "credit"
+            ? originalAmount
+            : -originalAmount;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Update wallet atomically
+        |--------------------------------------------------------------------------
+        |
+        | Using increment prevents lost updates when another legitimate wallet
+        | transaction occurs at nearly the same time.
+        |
+        |--------------------------------------------------------------------------
+        */
+
+        const updatedWallet = await transaction.wallets.update({
+          where: {
+            id: originalWalletTransaction.wallet_id,
+          },
+          data: {
+            balance: {
+              increment: reversalDelta,
+            },
+            updated_at: new Date(),
+          },
+        });
+
+        const balanceAfter =
+          Math.round(Number(updatedWallet.balance) * 100) / 100;
+
+        const balanceBefore =
+          Math.round((balanceAfter - reversalDelta) * 100) / 100;
+
+        /*
+        |--------------------------------------------------------------------------
+        | Mark earning as refunded
+        |--------------------------------------------------------------------------
+        */
+
+        const refundedEarning = await transaction.provider_earnings.update({
+          where: {
+            booking_id: bookingId,
+          },
+          data: {
+            status: "refunded",
+            updated_at: new Date(),
+          },
+        });
+
+        /*
+        |--------------------------------------------------------------------------
+        | Record refund reversal in wallet history
+        |--------------------------------------------------------------------------
+        */
+
+        const refundWalletTransaction =
+          await transaction.wallet_transactions.create({
+            data: {
+              wallet_id: originalWalletTransaction.wallet_id,
+              booking_id: bookingId,
+
+              transaction_type: reversalTransactionType,
+
+              source_type: "refund_reversal",
+
+              amount: originalAmount.toFixed(2),
+
+              balance_before: balanceBefore.toFixed(2),
+
+              balance_after: balanceAfter.toFixed(2),
+
+              description: `Refund reversal for booking #${bookingId}`,
+
+              created_at: new Date(),
+            },
+          });
+
+        const refundedPayment = await transaction.payments.findUnique({
+          where: {
+            id: paymentId,
+          },
+          include: {
+            bookings: {
+              select: {
+                id: true,
+                customer_id: true,
+                provider_id: true,
+                status: true,
+                services: {
+                  select: {
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        });
+
+        return {
+          payment: refundedPayment,
+          earning: refundedEarning,
+          wallet: updatedWallet,
+          walletTransaction: refundWalletTransaction,
+        };
+      });
+
+      return response.status(200).json({
+        message:
+          "Payment refunded and provider financial settlement reversed successfully",
+        payment: result.payment,
+        refund: {
+          earning_status: result.earning.status,
+          wallet_balance: Number(result.wallet.balance),
+          wallet_transaction: result.walletTransaction,
+        },
+      });
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Non-financial pending / failed changes
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+      existingPayment.payment_status !== "pending" &&
+      existingPayment.payment_status !== "failed"
+    ) {
+      return response.status(400).json({
+        message:
+          "Only pending and failed payments can be changed through this status update.",
+      });
+    }
+
+    if (status !== "pending" && status !== "failed") {
+      return response.status(400).json({
+        message:
+          "Pending or failed payments may only be changed between pending and failed.",
       });
     }
 
@@ -623,12 +947,7 @@ export const updatePaymentStatusForAdmin = async (
       },
       data: {
         payment_status: status,
-        paid_at:
-          status === "paid"
-            ? now
-            : status === "pending" || status === "failed"
-              ? null
-              : existingPayment.paid_at,
+        paid_at: null,
         updated_at: now,
       },
       include: {
@@ -654,6 +973,33 @@ export const updatePaymentStatusForAdmin = async (
     });
   } catch (error) {
     console.error("Admin update payment status error:", error);
+
+    if (error instanceof Error) {
+      if (
+        error.message === "PAYMENT_ALREADY_CHANGED" ||
+        error.message === "EARNING_ALREADY_REFUNDED" ||
+        error.message === "REFUND_ALREADY_REVERSED"
+      ) {
+        return response.status(409).json({
+          message:
+            "This payment has already been refunded or changed by another request.",
+        });
+      }
+
+      if (error.message === "PROVIDER_EARNING_NOT_FOUND") {
+        return response.status(409).json({
+          message:
+            "Refund could not be completed because the provider earning record is missing.",
+        });
+      }
+
+      if (error.message === "ORIGINAL_WALLET_TRANSACTION_NOT_FOUND") {
+        return response.status(409).json({
+          message:
+            "Refund could not be completed because the original wallet settlement could not be found.",
+        });
+      }
+    }
 
     return response.status(500).json({
       message: "Something went wrong while updating payment status",

@@ -302,6 +302,9 @@ export const getProviderEarningsSummary = async (
       prisma.provider_earnings.aggregate({
         where: {
           provider_id: providerId,
+          status: {
+            not: "refunded",
+          },
         },
         _sum: {
           gross_amount: true,
@@ -313,6 +316,9 @@ export const getProviderEarningsSummary = async (
       prisma.provider_earnings.aggregate({
         where: {
           provider_id: providerId,
+          status: {
+            not: "refunded",
+          },
           credited_at: {
             gte: todayStart,
           },
@@ -325,6 +331,9 @@ export const getProviderEarningsSummary = async (
       prisma.provider_earnings.aggregate({
         where: {
           provider_id: providerId,
+          status: {
+            not: "refunded",
+          },
           credited_at: {
             gte: weekStart,
           },
@@ -337,6 +346,9 @@ export const getProviderEarningsSummary = async (
       prisma.provider_earnings.aggregate({
         where: {
           provider_id: providerId,
+          status: {
+            not: "refunded",
+          },
           credited_at: {
             gte: monthStart,
           },
@@ -349,6 +361,9 @@ export const getProviderEarningsSummary = async (
       prisma.provider_earnings.count({
         where: {
           provider_id: providerId,
+          status: {
+            not: "refunded",
+          },
         },
       }),
 
