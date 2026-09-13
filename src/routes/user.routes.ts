@@ -13,6 +13,7 @@ import {
 } from "../controllers/user.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
+import { loginRateLimiter } from "../middlewares/rate-limit.middleware";
 
 const router = Router();
 
@@ -26,7 +27,7 @@ const router = Router();
 
 router.post("/register", registerUser);
 
-router.post("/login", loginUser);
+router.post("/login", loginRateLimiter, loginUser);
 
 /*
 |--------------------------------------------------------------------------

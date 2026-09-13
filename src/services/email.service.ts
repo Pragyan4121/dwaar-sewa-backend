@@ -1,4 +1,4 @@
-import { Resend } from "resend";
+import nodemailer, { type Transporter } from "nodemailer";
 
 export type EmailOtpPurpose = "provider_registration" | "forgot_password";
 
@@ -9,24 +9,43 @@ interface SendOtpEmailInput {
   recipientName?: string | null;
 }
 
-function getResendClient(): Resend {
-  const apiKey = process.env.RESEND_API_KEY;
+let cachedTransporter: Transporter | null = null;
 
-  if (!apiKey) {
-    throw new Error("RESEND_API_KEY_NOT_CONFIGURED");
+function getGmailTransporter(): Transporter {
+  if (cachedTransporter) {
+    return cachedTransporter;
   }
 
-  return new Resend(apiKey);
+  const gmailUser = process.env.GMAIL_USER;
+  const gmailAppPassword = process.env.GMAIL_APP_PASSWORD;
+
+  if (!gmailUser) {
+    throw new Error("GMAIL_USER_NOT_CONFIGURED");
+  }
+
+  if (!gmailAppPassword) {
+    throw new Error("GMAIL_APP_PASSWORD_NOT_CONFIGURED");
+  }
+
+  cachedTransporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: gmailUser,
+      pass: gmailAppPassword,
+    },
+  });
+
+  return cachedTransporter;
 }
 
-function getSenderEmail(): string {
-  const senderEmail = process.env.RESEND_FROM_EMAIL;
+function getSenderAddress(): string {
+  const gmailUser = process.env.GMAIL_USER;
 
-  if (!senderEmail) {
-    throw new Error("RESEND_FROM_EMAIL_NOT_CONFIGURED");
+  if (!gmailUser) {
+    throw new Error("GMAIL_USER_NOT_CONFIGURED");
   }
 
-  return senderEmail;
+  return `Dwaar Sewa <${gmailUser}>`;
 }
 
 function getOtpEmailContent(
@@ -39,11 +58,11 @@ function getOtpEmailContent(
 
   if (purpose === "forgot_password") {
     return {
-      subject: "Reset your Dwaar Sewa provider password",
+      subject: "Reset your Dwaar Sewa password",
       title: "Password reset verification",
       greeting,
       description:
-        "Use the verification code below to reset your Dwaar Sewa provider account password.",
+        "Use the verification code below to reset your Dwaar Sewa account password.",
     };
   }
 
@@ -68,8 +87,8 @@ export async function sendOtpEmail({
     throw new Error("RECIPIENT_EMAIL_REQUIRED");
   }
 
-  const resend = getResendClient();
-  const from = getSenderEmail();
+  const transporter = getGmailTransporter();
+  const from = getSenderAddress();
 
   const content = getOtpEmailContent(purpose, recipientName);
 
@@ -78,26 +97,27 @@ export async function sendOtpEmail({
   const safeExpiryMinutes =
     Number.isInteger(expiryMinutes) && expiryMinutes > 0 ? expiryMinutes : 10;
 
-  const result = await resend.emails.send({
-    from,
-    to: normalizedEmail,
-    subject: content.subject,
+  try {
+    await transporter.sendMail({
+      from,
+      to: normalizedEmail,
+      subject: content.subject,
 
-    text: [
-      content.greeting,
-      "",
-      content.description,
-      "",
-      `Verification code: ${otp}`,
-      "",
-      `This code expires in ${safeExpiryMinutes} minutes.`,
-      "",
-      "If you did not request this code, you can safely ignore this email.",
-      "",
-      "Dwaar Sewa",
-    ].join("\n"),
+      text: [
+        content.greeting,
+        "",
+        content.description,
+        "",
+        `Verification code: ${otp}`,
+        "",
+        `This code expires in ${safeExpiryMinutes} minutes.`,
+        "",
+        "If you did not request this code, you can safely ignore this email.",
+        "",
+        "Dwaar Sewa",
+      ].join("\n"),
 
-    html: `
+      html: `
       <!DOCTYPE html>
       <html lang="en">
         <head>
@@ -283,10 +303,9 @@ export async function sendOtpEmail({
         </body>
       </html>
     `,
-  });
-
-  if (result.error) {
-    console.error("Resend email error:", result.error);
+    });
+  } catch (error) {
+    console.error("Gmail send email error:", error);
     throw new Error("OTP_EMAIL_SEND_FAILED");
   }
 }

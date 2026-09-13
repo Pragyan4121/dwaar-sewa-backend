@@ -1,11 +1,19 @@
 import http from "node:http";
 import path from "node:path";
 
+import cookieParser from "cookie-parser";
 import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
+import helmet from "helmet";
 
 import { prisma } from "./config/prisma";
+import {
+  globalRateLimiter,
+  loginRateLimiter,
+  otpRateLimiter,
+  paymentRateLimiter,
+} from "./middlewares/rate-limit.middleware";
 
 import adminCustomerRoutes from "./routes/admin-customer.routes";
 import adminDashboardRoutes from "./routes/admin-dashboard.routes";
@@ -60,6 +68,20 @@ const allowedOrigins = [
 ];
 
 app.use(
+  helmet({
+    /*
+     * This API serves JSON to a separate admin SPA and a mobile app, not
+     * HTML pages, so a strict default-src CSP mainly matters for the
+     * static /uploads files below and the odd HTML error page. Cross-
+     * origin resource sharing for uploaded images (served to the admin
+     * panel / app on different origins) requires disabling
+     * crossOriginResourcePolicy's default "same-origin" restriction.
+     */
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  }),
+);
+
+app.use(
   cors({
     origin: allowedOrigins,
 
@@ -67,9 +89,28 @@ app.use(
   }),
 );
 
+app.use(cookieParser());
+
 app.use(express.json());
 
-app.use("/uploads", express.static(path.resolve(process.cwd(), "uploads")));
+/*
+ * A light global rate limit as a backstop, on top of the stricter
+ * route-specific limiters applied to auth/OTP/payment endpoints below.
+ */
+app.use(globalRateLimiter);
+
+app.use(
+  "/uploads",
+  express.static(path.resolve(process.cwd(), "uploads"), {
+    setHeaders: (response) => {
+      // Belt-and-suspenders alongside the upload-time file-signature
+      // check: never let the browser execute/sniff an uploaded file as
+      // something other than a passive download.
+      response.setHeader("X-Content-Type-Options", "nosniff");
+      response.setHeader("Content-Disposition", "inline");
+    },
+  }),
+);
 
 /*
 |--------------------------------------------------------------------------
@@ -162,31 +203,12 @@ app.get("/", (_request, response) => {
 
 /*
 |--------------------------------------------------------------------------
-| Database connection test
-|--------------------------------------------------------------------------
-*/
-
-app.get("/database-test", async (_request, response) => {
-  try {
-    const roles = await prisma.roles.findMany();
-
-    return response.status(200).json({
-      message: "Database connection is working",
-
-      roles,
-    });
-  } catch (error) {
-    console.error("Database test error:", error);
-
-    return response.status(500).json({
-      message: "Database connection failed",
-    });
-  }
-});
-
-/*
-|--------------------------------------------------------------------------
 | Health check
+|--------------------------------------------------------------------------
+|
+| (The old public, unauthenticated /database-test route that returned raw
+| roles-table contents has been removed — this /health endpoint is the
+| supported way to check DB connectivity without exposing query results.)
 |--------------------------------------------------------------------------
 */
 

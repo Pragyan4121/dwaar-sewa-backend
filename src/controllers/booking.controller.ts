@@ -1352,6 +1352,22 @@ export const startAssignedBooking = async (
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| Provider: Complete booking
+|--------------------------------------------------------------------------
+|
+| Completing the service does NOT mean payment has been received.
+|
+| CASH:
+| completed -> payment pending -> provider confirms Payment Received
+|
+| ONLINE:
+| completed -> payment pending -> gateway success verifies payment
+|
+|--------------------------------------------------------------------------
+*/
+
 export const completeAssignedBooking = async (
   request: AuthenticatedRequest,
   response: Response,
@@ -1384,15 +1400,17 @@ export const completeAssignedBooking = async (
         id: bookingId,
         provider_id: providerId,
       },
+
       select: {
         id: true,
+        customer_id: true,
         provider_id: true,
         status: true,
         payment_method: true,
-        discount_amount: true,
+
+        promotion_id: true,
         promo_discount_percent_snapshot: true,
         promo_max_discount_snapshot: true,
-        promotion_id: true,
       },
     });
 
@@ -1410,110 +1428,72 @@ export const completeAssignedBooking = async (
 
     const now = new Date();
 
-    const result = await prisma.$transaction(async (transaction) => {
-      /*
-      |--------------------------------------------------------------------------
-      | Read admin-configured provider commission
-      |--------------------------------------------------------------------------
-      */
+    const roundedFinalPrice = Math.round(finalPrice * 100) / 100;
 
-      const commissionSetting = await transaction.system_settings.findUnique({
-        where: {
-          setting_key: "provider_commission_percent",
-        },
-      });
+    /*
+    |--------------------------------------------------------------------------
+    | Recalculate promotion using booking snapshots
+    |--------------------------------------------------------------------------
+    */
 
-      if (!commissionSetting) {
-        throw new Error("PROVIDER_COMMISSION_SETTING_MISSING");
-      }
+    let appliedDiscountAmount = 0;
 
-      const commissionPercentage = Number(commissionSetting.setting_value);
+    if (
+      booking.promotion_id !== null &&
+      booking.promo_discount_percent_snapshot !== null
+    ) {
+      const promoDiscountPercent = Math.max(
+        0,
+        Number(booking.promo_discount_percent_snapshot),
+      );
 
-      if (
-        !Number.isFinite(commissionPercentage) ||
-        commissionPercentage < 0 ||
-        commissionPercentage > 100
-      ) {
-        throw new Error("PROVIDER_COMMISSION_SETTING_INVALID");
-      }
-
-      if (
-        !Number.isFinite(commissionPercentage) ||
-        commissionPercentage < 0 ||
-        commissionPercentage > 100
-      ) {
-        throw new Error(
-          "Invalid provider commission percentage in system settings",
-        );
-      }
-
-      /*
-      |--------------------------------------------------------------------------
-      | Calculate provider earning
-      |--------------------------------------------------------------------------
-      */
-
-      const roundedFinalPrice = Math.round(finalPrice * 100) / 100;
-
-      let appliedDiscountAmount = 0;
-
-      if (
-        booking.promotion_id !== null &&
-        booking.promo_discount_percent_snapshot !== null
-      ) {
-        const promoDiscountPercent = Math.max(
-          0,
-          Number(booking.promo_discount_percent_snapshot),
-        );
-
-        appliedDiscountAmount =
-          Math.round(((roundedFinalPrice * promoDiscountPercent) / 100) * 100) /
-          100;
-
-        if (booking.promo_max_discount_snapshot !== null) {
-          appliedDiscountAmount = Math.min(
-            appliedDiscountAmount,
-            Number(booking.promo_max_discount_snapshot),
-          );
-        }
-
-        appliedDiscountAmount = Math.min(
-          appliedDiscountAmount,
-          roundedFinalPrice,
-        );
-
-        appliedDiscountAmount = Math.round(appliedDiscountAmount * 100) / 100;
-      }
-
-      const customerPayableAmount =
-        Math.round(
-          Math.max(0, roundedFinalPrice - appliedDiscountAmount) * 100,
-        ) / 100;
-
-      const commissionAmount =
-        Math.round(roundedFinalPrice * (commissionPercentage / 100) * 100) /
+      appliedDiscountAmount =
+        Math.round(((roundedFinalPrice * promoDiscountPercent) / 100) * 100) /
         100;
 
-      const providerNetAmount =
-        Math.round((roundedFinalPrice - commissionAmount) * 100) / 100;
+      if (booking.promo_max_discount_snapshot !== null) {
+        appliedDiscountAmount = Math.min(
+          appliedDiscountAmount,
+          Number(booking.promo_max_discount_snapshot),
+        );
+      }
 
-      const isCashBooking = booking.payment_method === PAYMENT_METHODS.CASH;
+      appliedDiscountAmount = Math.min(
+        appliedDiscountAmount,
+        roundedFinalPrice,
+      );
 
-      /*
-      |--------------------------------------------------------------------------
-      | Atomically complete booking
-      |--------------------------------------------------------------------------
-      |
-      | updateMany prevents duplicate completion and duplicate wallet credits.
-      |--------------------------------------------------------------------------
-      */
+      appliedDiscountAmount = Math.round(appliedDiscountAmount * 100) / 100;
+    }
 
+    const customerPayableAmount =
+      Math.round(Math.max(0, roundedFinalPrice - appliedDiscountAmount) * 100) /
+      100;
+
+    const isCashBooking = booking.payment_method === PAYMENT_METHODS.CASH;
+
+    /*
+    |--------------------------------------------------------------------------
+    | Complete service + create PENDING payment
+    |--------------------------------------------------------------------------
+    |
+    | IMPORTANT:
+    | - no provider earning here
+    | - no wallet credit here
+    | - no cash commission deduction here
+    | - payment is NOT marked paid here
+    |
+    |--------------------------------------------------------------------------
+    */
+
+    const result = await prisma.$transaction(async (transaction) => {
       const bookingUpdateResult = await transaction.bookings.updateMany({
         where: {
           id: bookingId,
           provider_id: providerId,
           status: "in_progress",
         },
+
         data: {
           status: "completed",
           final_price: roundedFinalPrice.toFixed(2),
@@ -1529,205 +1509,107 @@ export const completeAssignedBooking = async (
       }
 
       /*
-      |--------------------------------------------------------------------------
-      | Create provider wallet when it does not exist
-      |--------------------------------------------------------------------------
-      */
-
-      const wallet = await transaction.wallets.upsert({
-        where: {
-          user_id: providerId,
-        },
-        update: {},
-        create: {
-          user_id: providerId,
-          balance: "0.00",
-          currency: "NPR",
-          is_active: true,
-          created_at: now,
-          updated_at: now,
-        },
-        select: {
-          id: true,
-          balance: true,
-          currency: true,
-          is_active: true,
-        },
-      });
-
-      if (!wallet.is_active) {
-        throw new Error("PROVIDER_WALLET_INACTIVE");
-      }
-
-      const balanceBefore = Math.round(Number(wallet.balance) * 100) / 100;
+        |--------------------------------------------------------------------------
+        | Payment remains pending
+        |--------------------------------------------------------------------------
+        */
 
       /*
-      |--------------------------------------------------------------------------
-      | Cash bookings: the customer already paid the provider directly, so
-      | only the platform's commission is pulled from the wallet. If the
-      | wallet doesn't have enough available balance to cover it, the
-      | balance simply goes negative — that is the amount the provider owes
-      | the platform, and it is automatically repaid out of the next
-      | online-payment earnings that get credited to the same wallet.
-      |
-      | Online bookings (eSewa/Khalti/Connect IPS): the platform collected
-      | the money, so the provider's net share (after commission) is
-      | credited to the wallet as before.
-      |--------------------------------------------------------------------------
-      */
-
-      const walletDelta = isCashBooking
-        ? Math.round((providerNetAmount - customerPayableAmount) * 100) / 100
-        : providerNetAmount;
-
-      const balanceAfter =
-        Math.round((balanceBefore + walletDelta) * 100) / 100;
-
-      /*
-      |--------------------------------------------------------------------------
-      | Create earning record
-      |--------------------------------------------------------------------------
-      */
-
-      const earning = await transaction.provider_earnings.create({
-        data: {
-          booking_id: bookingId,
-          provider_id: providerId,
-          gross_amount: roundedFinalPrice.toFixed(2),
-          commission_percentage: commissionPercentage.toFixed(2),
-          commission_amount: commissionAmount.toFixed(2),
-          net_amount: providerNetAmount.toFixed(2),
-          status: isCashBooking ? "cash_collected_by_provider" : "available",
-          credited_at: now,
-          created_at: now,
-          updated_at: now,
-        },
-      });
-
-      /*
-      |--------------------------------------------------------------------------
-      | Update provider wallet
-      |--------------------------------------------------------------------------
-      */
-
-      const updatedWallet = await transaction.wallets.update({
-        where: {
-          id: wallet.id,
-        },
-        data: {
-          balance: balanceAfter.toFixed(2),
-          updated_at: now,
-        },
-      });
-
-      /*
-      |--------------------------------------------------------------------------
-      | Create wallet transaction history
-      |--------------------------------------------------------------------------
-      */
-
-      const walletTransactionType = walletDelta < 0 ? "debit" : "credit";
-
-      const walletTransactionAmount =
-        Math.round(Math.abs(walletDelta) * 100) / 100;
-
-      const walletSourceType = isCashBooking
-        ? walletDelta < 0
-          ? "cash_commission_due"
-          : "cash_booking_adjustment"
-        : "booking_earning";
-
-      const walletDescription = isCashBooking
-        ? walletDelta < 0
-          ? `Settlement due to platform for cash booking #${bookingId}`
-          : walletDelta > 0
-            ? `Platform-funded promotion adjustment credited for cash booking #${bookingId}`
-            : `Cash booking #${bookingId} settled with no wallet adjustment`
-        : `Earning credited for completed booking #${bookingId}`;
-
-      const walletTransaction = await transaction.wallet_transactions.create({
-        data: {
-          wallet_id: wallet.id,
-          booking_id: bookingId,
-
-          transaction_type: walletTransactionType,
-
-          source_type: walletSourceType,
-
-          amount: walletTransactionAmount.toFixed(2),
-
-          balance_before: balanceBefore.toFixed(2),
-
-          balance_after: balanceAfter.toFixed(2),
-
-          description: walletDescription,
-
-          created_at: now,
-        },
-      });
-
-      /*
-      |--------------------------------------------------------------------------
-      | Record the payment collected for this booking
-      |--------------------------------------------------------------------------
-      */
+|--------------------------------------------------------------------------
+| Initialize payment after service completion
+|--------------------------------------------------------------------------
+|
+| Completing a service does NOT mean payment has been received.
+|
+| Cash:
+|   Provider must confirm "Payment Received".
+|
+| Online:
+|   eSewa / Khalti / ConnectIPS gateway must verify successful payment.
+|
+|--------------------------------------------------------------------------
+*/
 
       const payment = await transaction.payments.upsert({
         where: {
           booking_id: bookingId,
         },
+
         update: {
           amount: customerPayableAmount.toFixed(2),
+
           payment_method: booking.payment_method,
-          payment_status: "paid",
-          paid_at: now,
+
+          payment_status: "pending",
+
+          transaction_reference: null,
+
+          paid_at: null,
+
           updated_at: now,
         },
+
         create: {
           booking_id: bookingId,
+
           amount: customerPayableAmount.toFixed(2),
+
           payment_method: booking.payment_method,
-          payment_status: "paid",
-          paid_at: now,
+
+          payment_status: "pending",
+
+          transaction_reference: null,
+
+          paid_at: null,
+
           created_at: now,
+
           updated_at: now,
         },
       });
 
       /*
-      |--------------------------------------------------------------------------
-      | Update completed-job counter
-      |--------------------------------------------------------------------------
-      */
+        |--------------------------------------------------------------------------
+        | Completed-job counter
+        |--------------------------------------------------------------------------
+        */
 
       await transaction.provider_profiles.updateMany({
         where: {
           provider_id: providerId,
         },
+
         data: {
           total_completed_jobs: {
             increment: 1,
           },
+
           updated_at: now,
         },
       });
 
       /*
-      |--------------------------------------------------------------------------
-      | Add booking status history
-      |--------------------------------------------------------------------------
-      */
+        |--------------------------------------------------------------------------
+        | Booking status history
+        |--------------------------------------------------------------------------
+        */
 
       await transaction.booking_status_history.create({
         data: {
           booking_id: bookingId,
+
           old_status: "in_progress",
+
           new_status: "completed",
+
           changed_by_user_id: providerId,
+
           changed_by_role: "provider",
+
           note: isCashBooking
-            ? "Booking completed by provider. Customer paid in cash."
-            : "Booking completed by provider.",
+            ? "Booking completed by provider. Cash payment is awaiting provider confirmation."
+            : "Booking completed by provider. Online payment is awaiting successful gateway verification.",
+
           created_at: now,
         },
       });
@@ -1740,44 +1622,32 @@ export const completeAssignedBooking = async (
 
       return {
         completedBooking,
-        earning,
-        wallet: updatedWallet,
-        walletTransaction,
         payment,
-        commissionPercentage,
-        commissionAmount,
-        providerNetAmount,
-        isCashBooking,
       };
     });
 
     await safelySyncOrderChatWithBookingStatus(bookingId, "completed");
 
     return response.status(200).json({
-      message: "Booking completed successfully",
+      message: isCashBooking
+        ? "Service completed. Waiting for cash payment confirmation."
+        : "Service completed. Online payment is pending.",
+
       booking: result.completedBooking,
-      earning: {
-        gross_amount: finalPrice,
-        commission_percentage: result.commissionPercentage,
-        commission_amount: result.commissionAmount,
-        net_amount: result.providerNetAmount,
-        settlement: result.isCashBooking
-          ? "cash_collected_by_provider"
-          : "credited_to_wallet",
-      },
+
       payment: {
+        id: result.payment.id,
         method: result.payment.payment_method,
         status: result.payment.payment_status,
+        amount: result.payment.amount,
+        paid_at: result.payment.paid_at,
       },
-      wallet: {
-        balance: result.wallet.balance,
-        currency: result.wallet.currency,
-        is_negative: Number(result.wallet.balance) < 0,
-        amount_owed_to_platform:
-          Number(result.wallet.balance) < 0
-            ? Math.abs(Number(result.wallet.balance)).toFixed(2)
-            : "0.00",
-      },
+
+      payment_action: isCashBooking
+        ? "provider_payment_received"
+        : "customer_online_payment",
+
+      settlement: "awaiting_payment",
     });
   } catch (error) {
     console.error("Complete booking error:", error);
@@ -1789,24 +1659,6 @@ export const completeAssignedBooking = async (
       return response.status(409).json({
         message: "Booking has already been completed or changed.",
       });
-    }
-
-    if (error instanceof Error) {
-      if (error.message === "PROVIDER_COMMISSION_SETTING_MISSING") {
-        return response.status(500).json({
-          message:
-            "Provider commission is not configured. Please configure it in Admin Settings.",
-          code: "PROVIDER_COMMISSION_SETTING_MISSING",
-        });
-      }
-
-      if (error.message === "PROVIDER_COMMISSION_SETTING_INVALID") {
-        return response.status(500).json({
-          message:
-            "Provider commission setting is invalid. Please correct it in Admin Settings.",
-          code: "PROVIDER_COMMISSION_SETTING_INVALID",
-        });
-      }
     }
 
     return response.status(500).json({

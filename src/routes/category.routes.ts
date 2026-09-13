@@ -16,6 +16,7 @@ import { uploadCategoryImage } from "../controllers/category.controller";
 import { upload } from "../middlewares/upload.middleware";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
+import { verifyFileSignature } from "../middlewares/verify-file-signature.middleware";
 
 const router = Router();
 
@@ -48,6 +49,7 @@ router.post(
   authenticateUser,
   allowRoles(ROLE_NAMES.ADMIN),
   upload.single("image"),
+  verifyFileSignature,
   uploadCategoryImage,
 );
 // Get one category for admin

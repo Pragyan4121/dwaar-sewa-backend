@@ -46,6 +46,30 @@ function extractBearerToken(
   return token;
 }
 
+/*
+ * The customer/provider apps send the JWT as a Bearer header (it's stored
+ * in expo-secure-store, not accessible to a browser XSS payload). The
+ * admin panel now receives its token as an httpOnly cookie instead, since
+ * it's a browser SPA where an XSS bug could otherwise read a
+ * header-only/localStorage token directly. Supporting both here lets one
+ * middleware serve every client without weakening either.
+ */
+function extractToken(request: Request): string | null {
+  const bearerToken = extractBearerToken(request.headers.authorization);
+
+  if (bearerToken) {
+    return bearerToken;
+  }
+
+  const cookieToken = (
+    request as Request & { cookies?: Record<string, string> }
+  ).cookies?.adminToken;
+
+  return typeof cookieToken === "string" && cookieToken.length > 0
+    ? cookieToken
+    : null;
+}
+
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
@@ -56,7 +80,7 @@ export const authenticateUser = async (
   next: NextFunction,
 ) => {
   try {
-    const token = extractBearerToken(request.headers.authorization);
+    const token = extractToken(request);
 
     if (!token) {
       return response.status(401).json({

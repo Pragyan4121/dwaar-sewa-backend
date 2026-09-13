@@ -292,6 +292,7 @@ export const getProviderEarningsSummary = async (
         select: {
           id: true,
           balance: true,
+          commission_due: true,
           currency: true,
           is_active: true,
           created_at: true,
@@ -385,8 +386,8 @@ export const getProviderEarningsSummary = async (
         balance: toNumber(wallet?.balance),
         currency: wallet?.currency ?? "NPR",
         is_active: wallet?.is_active ?? true,
-        available_balance: Math.max(toNumber(wallet?.balance), 0),
-        amount_owed_to_platform: Math.max(-toNumber(wallet?.balance), 0),
+        available_balance: toNumber(wallet?.balance),
+        amount_owed_to_platform: toNumber(wallet?.commission_due),
       },
 
       earnings: {

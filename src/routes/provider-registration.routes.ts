@@ -18,6 +18,7 @@ import {
   uploadProviderDocument,
   uploadProviderProfilePhoto,
 } from "../middlewares/provider-upload.middleware";
+import { verifyFileSignature } from "../middlewares/verify-file-signature.middleware";
 
 const router = Router();
 
@@ -69,6 +70,7 @@ router.post(
   authenticateUser,
   allowRoles(ROLE_NAMES.PROVIDER),
   uploadProviderProfilePhoto,
+  verifyFileSignature,
   uploadProfilePhoto,
 );
 
@@ -77,6 +79,7 @@ router.post(
   authenticateUser,
   allowRoles(ROLE_NAMES.PROVIDER),
   uploadProviderDocument,
+  verifyFileSignature,
   uploadDocumentFile,
 );
 

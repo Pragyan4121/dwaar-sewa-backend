@@ -809,75 +809,95 @@ export const getProviderQuickReplies = async (
 
     const roleName = await getAuthenticatedUserRole(userId);
 
-    if (roleName !== "provider") {
+    if (roleName !== "customer" && roleName !== "provider") {
       return response.status(403).json({
-        message: "Quick reply templates are available only to providers.",
+        message:
+          "Quick reply templates are available only to customers and providers.",
       });
     }
 
+    const providerReplies = [
+      {
+        id: "booking_confirmed",
+        label: "Booking confirmed",
+        message:
+          "Your booking is confirmed. I will provide the service at the scheduled time.",
+      },
+      {
+        id: "on_my_way",
+        label: "On my way",
+        message: "I am on my way to your service location.",
+      },
+      {
+        id: "arriving_soon",
+        label: "Arriving soon",
+        message: "I will arrive at your location shortly.",
+      },
+      {
+        id: "arrived",
+        label: "I have arrived",
+        message: "I have arrived at your service location.",
+      },
+      {
+        id: "please_call",
+        label: "Please call me",
+        message: "Please call me when convenient regarding this booking.",
+      },
+      {
+        id: "location_help",
+        label: "Need location help",
+        message: "I am nearby but need some help locating your address.",
+      },
+    ];
+
+    const customerReplies = [
+      {
+        id: "thank_you",
+        label: "Thank you",
+        message: "Thank you.",
+      },
+      {
+        id: "where_are_you",
+        label: "Where are you?",
+        message: "Hello, could you please let me know where you are?",
+      },
+      {
+        id: "call_me",
+        label: "Please call me",
+        message: "Please call me when you are available.",
+      },
+      {
+        id: "address_help",
+        label: "Need address help?",
+        message:
+          "Please let me know if you need any help finding my service location.",
+      },
+      {
+        id: "running_late",
+        label: "Running late",
+        message:
+          "I may be a little late. Please let me know if that causes any issue.",
+      },
+      {
+        id: "service_question",
+        label: "Service question",
+        message: "I have a question about the service before you arrive.",
+      },
+    ];
+
     return response.status(200).json({
       message: "Quick replies fetched successfully",
-
-      quick_replies: [
-        {
-          id: "booking_confirmed",
-
-          label: "Booking confirmed",
-
-          message:
-            "Your booking is confirmed. I will provide the service at the scheduled time.",
-        },
-
-        {
-          id: "on_my_way",
-
-          label: "On my way",
-
-          message: "I am on my way to your service location.",
-        },
-
-        {
-          id: "arriving_soon",
-
-          label: "Arriving soon",
-
-          message: "I will arrive at your location shortly.",
-        },
-
-        {
-          id: "arrived",
-
-          label: "I have arrived",
-
-          message: "I have arrived at your service location.",
-        },
-
-        {
-          id: "please_call",
-
-          label: "Please call me",
-
-          message: "Please call me when convenient regarding this booking.",
-        },
-
-        {
-          id: "location_help",
-
-          label: "Need location help",
-
-          message: "I am nearby but need some help locating your address.",
-        },
-      ],
+      quick_replies:
+        roleName === "provider" ? providerReplies : customerReplies,
     });
   } catch (error) {
-    console.error("Get provider quick replies error:", error);
+    console.error("Get quick replies error:", error);
 
     return response.status(500).json({
       message: "Something went wrong while fetching quick replies.",
     });
   }
 };
-
 /*
 |--------------------------------------------------------------------------
 | CREATE VOICE CALL LOG

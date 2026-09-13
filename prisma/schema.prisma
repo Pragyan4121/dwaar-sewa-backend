@@ -178,6 +178,8 @@ model users {
   password_hash     String
   role_id           Int
   is_active         Boolean?  @default(true)
+  failed_login_attempts Int       @default(0)
+  locked_until          DateTime? @db.Timestamp(6)
   created_at        DateTime? @default(now()) @db.Timestamp(6)
   updated_at        DateTime? @default(now()) @db.Timestamp(6)
 
@@ -235,10 +237,11 @@ model email_otps {
 
 /// Provider wallet.
 model wallets {
-  id         Int       @id @default(autoincrement())
-  user_id    Int       @unique
-  balance    Decimal   @default(0.00) @db.Decimal(12, 2)
-  currency   String    @default("NPR") @db.VarChar(10)
+  id             Int       @id @default(autoincrement())
+  user_id        Int       @unique
+  balance        Decimal   @default(0.00) @db.Decimal(12, 2)
+  commission_due Decimal   @default(0.00) @db.Decimal(12, 2)
+  currency       String    @default("NPR") @db.VarChar(10)
   is_active  Boolean   @default(true)
   created_at DateTime? @default(now()) @db.Timestamp(6)
   updated_at DateTime? @default(now()) @db.Timestamp(6)

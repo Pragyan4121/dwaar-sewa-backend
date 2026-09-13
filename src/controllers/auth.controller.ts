@@ -48,20 +48,51 @@ function normalizePositiveIntegerArray(value: unknown): number[] {
   return [...new Set(normalizedValues)];
 }
 
-function validatePassword(password: string): string | null {
+function validatePassword(
+  password: string,
+  minimumLength: number = 6,
+): string | null {
   if (!password) {
     return "Password is required";
   }
 
-  if (password.length < 8) {
-    return "Password must contain at least 8 characters";
+  if (password.length < minimumLength) {
+    return "Password must contain at least ${minimumLength} characters";
   }
 
-  if (password.length > 128) {
-    return "Password must not exceed 128 characters";
+  if (password.length > 24) {
+    return "Password must not exceed 24 characters";
   }
 
   return null;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Login lockout configuration
+|--------------------------------------------------------------------------
+|
+| Applied to the admin login flow, the highest-privilege account on the
+| platform. This is a per-account backstop that complements (does not
+| replace) the per-IP rate limiter on the /admin/login route: the rate
+| limiter stops a single source from hammering the endpoint, this stops
+| a slow/distributed attack against one specific admin account.
+|--------------------------------------------------------------------------
+*/
+
+const MAX_FAILED_LOGIN_ATTEMPTS = 10;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
+function setAuthCookie(response: Response, token: string): void {
+  const isProduction = process.env.NODE_ENV === "production";
+
+  response.cookie("adminToken", token, {
+    httpOnly: true,
+    secure: isProduction,
+    sameSite: "strict",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: "/",
+  });
 }
 
 function createAccessToken(input: {
@@ -311,7 +342,7 @@ export const registerProvider = async (
       });
     }
 
-    const passwordError = validatePassword(password);
+    const passwordError = validatePassword(password, 8);
 
     if (passwordError) {
       return response.status(400).json({
@@ -2016,9 +2047,10 @@ export const loginProvider = async (request: Request, response: Response) => {
       provider.password_hash,
     );
 
-    if (!passwordMatches) {
+    if (!provider) {
       return response.status(401).json({
-        message: "Invalid provider credentials",
+        message: "No provider account found with this email or phone number",
+        field: "email",
       });
     }
 
@@ -2181,13 +2213,83 @@ export const loginAdmin = async (request: Request, response: Response) => {
       });
     }
 
+    /*
+     * failed_login_attempts / locked_until are read and written via raw
+     * SQL rather than the generated Prisma Client (prisma.users.update /
+     * findFirst's `select`) because these columns were added in the
+     * 202609090001_add_login_lockout migration and the checked-in
+     * generated client under src/generated/prisma has not been
+     * regenerated against it yet. Run:
+     *
+     *   npx prisma migrate deploy   (or `migrate dev` locally)
+     *   npx prisma generate
+     *
+     * after pulling this change, against a database that actually has
+     * the new columns — at that point this raw SQL can be swapped back
+     * for typed prisma.users.update({ data: { failed_login_attempts, ... } })
+     * calls if you prefer; both are equally safe (parameterized), this
+     * is purely about not depending on not-yet-regenerated types.
+     */
+    const [lockoutState] = await prisma.$queryRaw<
+      Array<{ failed_login_attempts: number; locked_until: Date | null }>
+    >`
+      SELECT failed_login_attempts, locked_until
+      FROM users
+      WHERE id = ${admin.id}
+    `;
+
+    const currentFailedAttempts = lockoutState?.failed_login_attempts ?? 0;
+    const currentLockedUntil = lockoutState?.locked_until ?? null;
+
+    if (currentLockedUntil && currentLockedUntil.getTime() > Date.now()) {
+      const remainingMinutes = Math.ceil(
+        (currentLockedUntil.getTime() - Date.now()) / 60000,
+      );
+
+      return response.status(423).json({
+        message: `Too many failed login attempts. Try again in ${remainingMinutes} minute(s).`,
+      });
+    }
+
     const passwordMatches = await bcrypt.compare(password, admin.password_hash);
 
     if (!passwordMatches) {
+      const updatedAttempts = currentFailedAttempts + 1;
+      const hasReachedLimit = updatedAttempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+
+      if (hasReachedLimit) {
+        const lockedUntil = new Date(Date.now() + LOCKOUT_DURATION_MS);
+
+        await prisma.$executeRaw`
+          UPDATE users
+          SET failed_login_attempts = 0, locked_until = ${lockedUntil}
+          WHERE id = ${admin.id}
+        `;
+
+        return response.status(423).json({
+          message:
+            "Too many failed login attempts. This account has been temporarily locked.",
+        });
+      }
+
+      await prisma.$executeRaw`
+        UPDATE users
+        SET failed_login_attempts = ${updatedAttempts}, locked_until = NULL
+        WHERE id = ${admin.id}
+      `;
+
       return response.status(401).json({
-        message: "Invalid admin credentials",
+        message: "Incorrect password",
+        field: "password",
       });
     }
+
+    // Successful login: reset the failed-attempt counter/lockout.
+    await prisma.$executeRaw`
+      UPDATE users
+      SET failed_login_attempts = 0, locked_until = NULL
+      WHERE id = ${admin.id}
+    `;
 
     const token = createAccessToken({
       userId: admin.id,
@@ -2195,8 +2297,14 @@ export const loginAdmin = async (request: Request, response: Response) => {
       roleName: ROLE_NAMES.ADMIN,
     });
 
+    setAuthCookie(response, token);
+
     return response.status(200).json({
       message: "Admin login successful",
+      // The token is also set as an httpOnly cookie above. It is still
+      // returned in the body for backward compatibility with any client
+      // that reads it directly; the admin panel itself no longer stores
+      // this value in localStorage (see the frontend api client).
       token,
       user: {
         id: admin.id,
@@ -2215,6 +2323,29 @@ export const loginAdmin = async (request: Request, response: Response) => {
       message: "Something went wrong while logging in as admin",
     });
   }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Admin logout
+|--------------------------------------------------------------------------
+|
+| The admin token is now stored as an httpOnly cookie, which client-side
+| JavaScript cannot delete itself — the server has to clear it.
+|--------------------------------------------------------------------------
+*/
+
+export const logoutAdmin = async (_request: Request, response: Response) => {
+  response.clearCookie("adminToken", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+  });
+
+  return response.status(200).json({
+    message: "Logged out successfully",
+  });
 };
 
 /*

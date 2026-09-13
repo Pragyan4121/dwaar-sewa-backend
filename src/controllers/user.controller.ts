@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import { prisma } from "../config/prisma";
 import { ROLE_NAMES } from "../constants/roles";
 import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
+import { validateEmailIsUsable } from "../utils/email-validation";
 
 function normalizePhone(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -221,7 +222,8 @@ export const loginUser = async (request: Request, response: Response) => {
 
     if (!user) {
       return response.status(401).json({
-        message: "Invalid customer credentials",
+        message: "No customer account found with this email or phone number",
+        field: "email",
       });
     }
 
@@ -235,7 +237,8 @@ export const loginUser = async (request: Request, response: Response) => {
 
     if (!passwordMatches) {
       return response.status(401).json({
-        message: "Invalid customer credentials",
+        message: "Incorrect password",
+        field: "password",
       });
     }
 
@@ -382,6 +385,15 @@ export const updateMyProfile = async (
      * A customer and provider may use the same email.
      */
     if (email) {
+      const emailCheck = await validateEmailIsUsable(email);
+
+      if (!emailCheck.valid) {
+        return response.status(400).json({
+          message: emailCheck.reason,
+          field: "email",
+        });
+      }
+
       const existingEmail = await prisma.users.findFirst({
         where: {
           email,
@@ -403,7 +415,6 @@ export const updateMyProfile = async (
         });
       }
     }
-
     const updatedUser = await prisma.users.update({
       where: {
         id: userId,

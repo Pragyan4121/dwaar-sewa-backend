@@ -533,8 +533,33 @@ export const getCashCommissionDueForAdmin = async (
       },
     });
 
-    const totalOwed = negativeWallets.reduce(
-      (sum, wallet) => sum + Math.abs(Number(wallet.balance)),
+    const walletsWithDues = await prisma.wallets.findMany({
+      where: {
+        commission_due: {
+          gt: 0,
+        },
+      },
+      select: {
+        id: true,
+        commission_due: true,
+        currency: true,
+        updated_at: true,
+        users: {
+          select: {
+            id: true,
+            full_name: true,
+            phone: true,
+            email: true,
+          },
+        },
+      },
+      orderBy: {
+        commission_due: "desc",
+      },
+    });
+
+    const totalOwed = walletsWithDues.reduce(
+      (sum, wallet) => sum + Number(wallet.commission_due),
       0,
     );
 
@@ -542,18 +567,18 @@ export const getCashCommissionDueForAdmin = async (
       message: "Cash commission due fetched successfully",
 
       summary: {
-        providers_with_dues: negativeWallets.length,
+        providers_with_dues: walletsWithDues.length,
         total_amount_owed: Math.round(totalOwed * 100) / 100,
       },
 
-      providers: negativeWallets.map((wallet) => ({
+      providers: walletsWithDues.map((wallet) => ({
         provider_id: wallet.users.id,
         full_name: wallet.users.full_name,
         phone: wallet.users.phone,
         email: wallet.users.email,
         wallet_id: wallet.id,
         currency: wallet.currency,
-        amount_owed: Math.abs(Number(wallet.balance)).toFixed(2),
+        amount_owed: Number(wallet.commission_due).toFixed(2),
         last_updated: wallet.updated_at,
       })),
     });

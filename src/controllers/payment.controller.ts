@@ -1,31 +1,323 @@
-import type { Request, Response } from "express";
-import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
+import type { Response } from "express";
+
 import { prisma } from "../config/prisma";
-import { ROLE_NAMES } from "../constants/roles";
+import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
+import { PAYMENT_METHODS } from "../constants/payment-methods";
+import crypto from "crypto";
 
-const APPROVED_PROVIDER_STATUS = "approved";
+function parseBookingId(value: unknown): number | null {
+  const bookingId = Number(value);
 
-function parsePositiveInteger(value: unknown): number | null {
-  const parsedValue = Number(value);
-
-  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+  if (!Number.isInteger(bookingId) || bookingId <= 0) {
     return null;
   }
 
-  return parsedValue;
+  return bookingId;
+}
+
+async function settlePaidBooking(
+  bookingId: number,
+  expectedPaymentMethod: "cash" | "online",
+  transactionReference?: string | null,
+) {
+  const now = new Date();
+
+  return prisma.$transaction(async (transaction) => {
+    const booking = await transaction.bookings.findUnique({
+      where: {
+        id: bookingId,
+      },
+      select: {
+        id: true,
+        customer_id: true,
+        provider_id: true,
+        status: true,
+        payment_method: true,
+        final_price: true,
+        customer_payable_amount: true,
+      },
+    });
+
+    if (!booking) {
+      throw new Error("BOOKING_NOT_FOUND");
+    }
+
+    if (booking.status !== "completed") {
+      throw new Error("BOOKING_NOT_COMPLETED");
+    }
+
+    if (!booking.provider_id) {
+      throw new Error("PROVIDER_NOT_ASSIGNED");
+    }
+
+    const isCashBooking = booking.payment_method === PAYMENT_METHODS.CASH;
+
+    if (expectedPaymentMethod === "cash" && !isCashBooking) {
+      throw new Error("NOT_CASH_PAYMENT");
+    }
+
+    if (expectedPaymentMethod === "online" && isCashBooking) {
+      throw new Error("NOT_ONLINE_PAYMENT");
+    }
+
+    const payment = await transaction.payments.findUnique({
+      where: {
+        booking_id: bookingId,
+      },
+    });
+
+    if (!payment) {
+      throw new Error("PAYMENT_NOT_FOUND");
+    }
+
+    const paymentUpdate = await transaction.payments.updateMany({
+      where: {
+        booking_id: bookingId,
+        payment_status: "pending",
+      },
+      data: {
+        payment_status: "paid",
+        paid_at: now,
+        ...(transactionReference
+          ? {
+              transaction_reference: transactionReference,
+            }
+          : {}),
+        updated_at: now,
+      },
+    });
+
+    if (paymentUpdate.count !== 1) {
+      const latestPayment = await transaction.payments.findUnique({
+        where: {
+          booking_id: bookingId,
+        },
+      });
+
+      if (latestPayment?.payment_status === "paid") {
+        throw new Error("PAYMENT_ALREADY_PAID");
+      }
+
+      throw new Error("PAYMENT_NOT_PENDING");
+    }
+
+    const existingEarning = await transaction.provider_earnings.findUnique({
+      where: {
+        booking_id: bookingId,
+      },
+    });
+
+    if (existingEarning) {
+      throw new Error("BOOKING_ALREADY_FINANCIALLY_SETTLED");
+    }
+
+    const commissionSetting = await transaction.system_settings.findUnique({
+      where: {
+        setting_key: "provider_commission_percent",
+      },
+    });
+
+    if (!commissionSetting) {
+      throw new Error("PROVIDER_COMMISSION_SETTING_MISSING");
+    }
+
+    const commissionPercentage = Number(commissionSetting.setting_value);
+
+    if (
+      !Number.isFinite(commissionPercentage) ||
+      commissionPercentage < 0 ||
+      commissionPercentage > 100
+    ) {
+      throw new Error("PROVIDER_COMMISSION_SETTING_INVALID");
+    }
+
+    const grossAmount =
+      Math.round(Number(booking.final_price ?? 0) * 100) / 100;
+
+    const customerPayableAmount =
+      Math.round(
+        Number(booking.customer_payable_amount ?? payment.amount ?? 0) * 100,
+      ) / 100;
+
+    const commissionAmount =
+      Math.round(grossAmount * (commissionPercentage / 100) * 100) / 100;
+
+    const providerNetAmount =
+      Math.round((grossAmount - commissionAmount) * 100) / 100;
+
+    const wallet = await transaction.wallets.upsert({
+      where: {
+        user_id: booking.provider_id,
+      },
+      update: {},
+      create: {
+        user_id: booking.provider_id,
+        balance: "0.00",
+        commission_due: "0.00",
+        currency: "NPR",
+        is_active: true,
+        created_at: now,
+        updated_at: now,
+      },
+      select: {
+        id: true,
+        balance: true,
+        commission_due: true,
+        currency: true,
+        is_active: true,
+      },
+    });
+
+    if (!wallet.is_active) {
+      throw new Error("PROVIDER_WALLET_INACTIVE");
+    }
+
+    const balanceBefore = Math.round(Number(wallet.balance) * 100) / 100;
+    const commissionDueBefore =
+      Math.round(Number(wallet.commission_due) * 100) / 100;
+
+    let balanceAfter = balanceBefore;
+    let commissionDueAfter = commissionDueBefore;
+    let walletTransactionAmount = 0;
+    let walletTransactionType: "debit" | "credit" = "credit";
+    let sourceType: string;
+    let description: string;
+
+    if (isCashBooking) {
+      // Provider already collected the full amount in cash, so they owe
+      // the platform the commission. Pay it out of their existing wallet
+      // balance first; anything the balance can't cover becomes tracked
+      // debt in commission_due instead of pushing balance negative.
+      const owedAmount =
+        Math.round((customerPayableAmount - providerNetAmount) * 100) / 100;
+
+      const paidFromBalance = Math.min(balanceBefore, Math.max(owedAmount, 0));
+      const remainderOwed =
+        Math.round((owedAmount - paidFromBalance) * 100) / 100;
+
+      balanceAfter = Math.round((balanceBefore - paidFromBalance) * 100) / 100;
+      commissionDueAfter =
+        Math.round((commissionDueBefore + remainderOwed) * 100) / 100;
+
+      walletTransactionAmount = owedAmount;
+      walletTransactionType = "debit";
+      sourceType = "cash_commission_due";
+      description =
+        remainderOwed > 0
+          ? `Cash booking #${bookingId}: Rs ${paidFromBalance.toFixed(2)} deducted from wallet, Rs ${remainderOwed.toFixed(2)} added to amount owed`
+          : `Cash booking #${bookingId} commission settled from wallet balance`;
+    } else {
+      // Online payment: credit the provider's net earning, but pay off
+      // any outstanding commission debt first before adding to balance.
+      const payoff = Math.min(commissionDueBefore, providerNetAmount);
+      const amountToBalance =
+        Math.round((providerNetAmount - payoff) * 100) / 100;
+
+      commissionDueAfter =
+        Math.round((commissionDueBefore - payoff) * 100) / 100;
+      balanceAfter = Math.round((balanceBefore + amountToBalance) * 100) / 100;
+
+      walletTransactionAmount = providerNetAmount;
+      walletTransactionType = "credit";
+      sourceType = "booking_earning";
+      description =
+        payoff > 0
+          ? `Booking #${bookingId} earning: Rs ${payoff.toFixed(2)} used to clear amount owed, Rs ${amountToBalance.toFixed(2)} credited to wallet`
+          : `Earning credited for paid online booking #${bookingId}`;
+    }
+
+    const earning = await transaction.provider_earnings.create({
+      data: {
+        booking_id: bookingId,
+        provider_id: booking.provider_id,
+        gross_amount: grossAmount.toFixed(2),
+        commission_percentage: commissionPercentage.toFixed(2),
+        commission_amount: commissionAmount.toFixed(2),
+        net_amount: providerNetAmount.toFixed(2),
+        status: isCashBooking ? "cash_collected_by_provider" : "available",
+        credited_at: now,
+        created_at: now,
+        updated_at: now,
+      },
+    });
+
+    const updatedWallet = await transaction.wallets.update({
+      where: {
+        id: wallet.id,
+      },
+      data: {
+        balance: balanceAfter.toFixed(2),
+        commission_due: commissionDueAfter.toFixed(2),
+        updated_at: now,
+      },
+    });
+
+    await transaction.wallet_transactions.create({
+      data: {
+        wallet_id: wallet.id,
+        booking_id: bookingId,
+        transaction_type: walletTransactionType,
+        source_type: sourceType,
+        amount: Math.abs(walletTransactionAmount).toFixed(2),
+        balance_before: balanceBefore.toFixed(2),
+        balance_after: balanceAfter.toFixed(2),
+        description,
+        created_at: now,
+      },
+    });
+
+    const updatedPayment = await transaction.payments.findUnique({
+      where: {
+        booking_id: bookingId,
+      },
+    });
+
+    return {
+      payment: updatedPayment,
+      earning,
+      wallet: updatedWallet,
+    };
+  });
 }
 /*
 |--------------------------------------------------------------------------
-| Authenticated provider: Get own profile/session
+| Verified online payment settlement
+|--------------------------------------------------------------------------
+|
+| This helper must only be called after eSewa/Khalti/ConnectIPS has been
+| verified server-side.
 |--------------------------------------------------------------------------
 */
 
-export const getMyProviderProfile = async (
+export async function settleVerifiedOnlinePayment(params: {
+  bookingId: number;
+  transactionReference: string;
+}) {
+  const bookingId = parseBookingId(params.bookingId);
+
+  if (!bookingId) {
+    throw new Error("INVALID_BOOKING_ID");
+  }
+
+  const transactionReference =
+    typeof params.transactionReference === "string"
+      ? params.transactionReference.trim()
+      : "";
+
+  if (!transactionReference) {
+    throw new Error("TRANSACTION_REFERENCE_REQUIRED");
+  }
+
+  return settlePaidBooking(bookingId, "online", transactionReference);
+}
+
+export const confirmCashPaymentReceived = async (
   request: AuthenticatedRequest,
   response: Response,
 ) => {
   try {
     const providerId = request.user?.userId;
+    const bookingId = parseBookingId(request.params.bookingId);
 
     if (!providerId) {
       return response.status(401).json({
@@ -33,802 +325,923 @@ export const getMyProviderProfile = async (
       });
     }
 
-    const provider = await prisma.users.findFirst({
-      where: {
-        id: providerId,
-        is_active: true,
-        roles: {
-          name: ROLE_NAMES.PROVIDER,
-        },
-      },
-      select: {
-        id: true,
-        full_name: true,
-        phone: true,
-        email: true,
-        email_verified_at: true,
-        role_id: true,
-        is_active: true,
-        created_at: true,
-        updated_at: true,
-
-        provider_profiles_provider_profiles_provider_idTousers: {
-          select: {
-            id: true,
-            address: true,
-            profile_photo_url: true,
-            years_of_experience: true,
-            bio: true,
-            verification_status: true,
-            verification_note: true,
-            verified_at: true,
-            suspended_at: true,
-            rejection_reason: true,
-            average_rating: true,
-            total_reviews: true,
-            total_completed_jobs: true,
-            created_at: true,
-            updated_at: true,
-          },
-        },
-
-        providerCategories: {
-          select: {
-            id: true,
-            category_id: true,
-            created_at: true,
-            service_categories: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                description: true,
-                image_url: true,
-                is_active: true,
-              },
-            },
-          },
-          orderBy: {
-            created_at: "asc",
-          },
-        },
-        provider_experience_types: {
-          select: {
-            id: true,
-            experience_type_id: true,
-            created_at: true,
-            experience_types: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-          orderBy: {
-            created_at: "asc",
-          },
-        },
-        provider_category_experiences: {
-          select: {
-            id: true,
-            category_id: true,
-            experience_type_id: true,
-            created_at: true,
-            service_categories: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-            experience_types: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-        },
-      },
-    });
-
-    if (!provider) {
-      return response.status(404).json({
-        message: "Provider account not found",
+    if (!bookingId) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
       });
     }
 
-    const profile =
-      provider.provider_profiles_provider_profiles_provider_idTousers;
+    const booking = await prisma.bookings.findFirst({
+      where: {
+        id: bookingId,
+        provider_id: providerId,
+      },
+      select: {
+        id: true,
+        status: true,
+        payment_method: true,
+      },
+    });
+
+    if (!booking) {
+      return response.status(404).json({
+        message: "Booking not found for this provider",
+      });
+    }
+
+    if (booking.payment_method !== PAYMENT_METHODS.CASH) {
+      return response.status(400).json({
+        message: "Only cash payments can be manually confirmed by the provider",
+      });
+    }
+
+    const result = await settlePaidBooking(bookingId, "cash");
 
     return response.status(200).json({
-      message: "Provider profile fetched successfully",
-
-      provider: {
-        id: provider.id,
-        full_name: provider.full_name,
-        phone: provider.phone,
-        email: provider.email,
-        email_verified: Boolean(provider.email_verified_at),
-        email_verified_at: provider.email_verified_at,
-        role_id: provider.role_id,
-        role_name: ROLE_NAMES.PROVIDER,
-        is_active: Boolean(provider.is_active),
-        joined_at: provider.created_at,
-        updated_at: provider.updated_at,
-
-        profile: profile
-          ? {
-              id: profile.id,
-              address: profile.address,
-              profile_photo_url: profile.profile_photo_url,
-              years_of_experience: profile.years_of_experience,
-              bio: profile.bio,
-              verification_status: profile.verification_status,
-              verification_note: profile.verification_note,
-              verified_at: profile.verified_at,
-              suspended_at: profile.suspended_at,
-              rejection_reason: profile.rejection_reason,
-              average_rating: profile.average_rating,
-              total_reviews: profile.total_reviews,
-              total_completed_jobs: profile.total_completed_jobs,
-              created_at: profile.created_at,
-              updated_at: profile.updated_at,
-            }
-          : null,
-
-        categories: provider.providerCategories.map((providerCategory) => ({
-          id: providerCategory.id,
-          category_id: providerCategory.category_id,
-          created_at: providerCategory.created_at,
-          category: providerCategory.service_categories,
-        })),
-
-        experiences: provider.provider_experience_types.map(
-          (providerExperience) => ({
-            id: providerExperience.id,
-            experience_type_id: providerExperience.experience_type_id,
-            created_at: providerExperience.created_at,
-            experience_type: providerExperience.experience_types,
-          }),
-        ),
-
-        category_experience: (
-          provider.provider_category_experiences as Array<{
-            id: number;
-            category_id: number;
-            experience_type_id: number;
-            created_at: Date;
-            service_categories: {
-              id: number;
-              name: string;
-            };
-            experience_types: {
-              id: number;
-              name: string;
-            };
-          }>
-        )
-          .map((entry) => ({
-            category_id: entry.category_id,
-            category_name: entry.service_categories.name,
-            experience_type: {
-              id: entry.experience_type_id,
-              name: entry.experience_types.name,
-            },
-          }))
-          .sort((first, second) =>
-            first.category_name.localeCompare(second.category_name),
-          ),
+      message: "Cash payment received and confirmed successfully",
+      payment: result.payment,
+      earning: result.earning,
+      wallet: {
+        balance: result.wallet.balance,
+        currency: result.wallet.currency,
       },
     });
   } catch (error) {
-    console.error("Get own provider profile error:", error);
+    console.error("Confirm cash payment error:", error);
+
+    if (error instanceof Error && error.message === "PAYMENT_ALREADY_PAID") {
+      return response.status(409).json({
+        message: "Payment has already been confirmed",
+      });
+    }
+
+    if (error instanceof Error && error.message === "BOOKING_NOT_COMPLETED") {
+      return response.status(409).json({
+        message: "Payment can only be confirmed after the service is completed",
+      });
+    }
 
     return response.status(500).json({
-      message: "Something went wrong while fetching the provider profile",
-    });
-  }
-};
-/*
-|--------------------------------------------------------------------------
-| Authenticated provider: Update own profile
-|--------------------------------------------------------------------------
-*/
-
-export const updateMyProviderProfile = async (
-  request: AuthenticatedRequest,
-  response: Response,
-) => {
-  try {
-    const providerId = request.user?.userId;
-
-    if (!providerId) {
-      return response.status(401).json({
-        message: "User is not authenticated",
-      });
-    }
-
-    const {
-      fullName,
-      phone,
-      address,
-      bio,
-      yearsOfExperience,
-      profilePhotoUrl,
-    } = request.body;
-
-    const existingProvider = await prisma.users.findFirst({
-      where: {
-        id: providerId,
-        is_active: true,
-        roles: {
-          name: ROLE_NAMES.PROVIDER,
-        },
-      },
-      select: {
-        id: true,
-        phone: true,
-        provider_profiles_provider_profiles_provider_idTousers: {
-          select: {
-            id: true,
-          },
-        },
-      },
-    });
-
-    if (!existingProvider) {
-      return response.status(404).json({
-        message: "Provider account not found",
-      });
-    }
-
-    const userUpdateData: {
-      full_name?: string;
-      phone?: string;
-      updated_at: Date;
-    } = {
-      updated_at: new Date(),
-    };
-
-    const profileUpdateData: {
-      address?: string | null;
-      bio?: string | null;
-      years_of_experience?: number;
-      profile_photo_url?: string | null;
-      updated_at: Date;
-    } = {
-      updated_at: new Date(),
-    };
-
-    if (fullName !== undefined) {
-      if (
-        typeof fullName !== "string" ||
-        fullName.trim().length < 2 ||
-        fullName.trim().length > 100
-      ) {
-        return response.status(400).json({
-          message: "Full name must contain between 2 and 100 characters",
-          field: "fullName",
-        });
-      }
-
-      userUpdateData.full_name = fullName.trim();
-    }
-
-    if (phone !== undefined) {
-      if (
-        typeof phone !== "string" ||
-        !/^[0-9+\-\s]{7,20}$/.test(phone.trim())
-      ) {
-        return response.status(400).json({
-          message: "Enter a valid phone number",
-          field: "phone",
-        });
-      }
-
-      const normalizedPhone = phone.trim();
-
-      if (normalizedPhone !== existingProvider.phone) {
-        const phoneAlreadyExists = await prisma.users.findFirst({
-          where: {
-            phone: normalizedPhone,
-            id: {
-              not: providerId,
-            },
-          },
-          select: {
-            id: true,
-          },
-        });
-
-        if (phoneAlreadyExists) {
-          return response.status(409).json({
-            message: "This phone number is already used by another account",
-            field: "phone",
-          });
-        }
-      }
-
-      userUpdateData.phone = normalizedPhone;
-    }
-
-    if (address !== undefined) {
-      if (
-        address !== null &&
-        (typeof address !== "string" || address.trim().length > 500)
-      ) {
-        return response.status(400).json({
-          message: "Address must not exceed 500 characters",
-          field: "address",
-        });
-      }
-
-      profileUpdateData.address =
-        typeof address === "string" && address.trim().length > 0
-          ? address.trim()
-          : null;
-    }
-
-    if (bio !== undefined) {
-      if (
-        bio !== null &&
-        (typeof bio !== "string" || bio.trim().length > 1000)
-      ) {
-        return response.status(400).json({
-          message: "Bio must not exceed 1000 characters",
-          field: "bio",
-        });
-      }
-
-      profileUpdateData.bio =
-        typeof bio === "string" && bio.trim().length > 0 ? bio.trim() : null;
-    }
-
-    if (yearsOfExperience !== undefined) {
-      const parsedYears = Number(yearsOfExperience);
-
-      if (
-        !Number.isInteger(parsedYears) ||
-        parsedYears < 0 ||
-        parsedYears > 80
-      ) {
-        return response.status(400).json({
-          message: "Years of experience must be between 0 and 80",
-          field: "yearsOfExperience",
-        });
-      }
-
-      profileUpdateData.years_of_experience = parsedYears;
-    }
-
-    if (profilePhotoUrl !== undefined) {
-      if (profilePhotoUrl !== null && typeof profilePhotoUrl !== "string") {
-        return response.status(400).json({
-          message: "Profile photo URL must be text",
-          field: "profilePhotoUrl",
-        });
-      }
-
-      profileUpdateData.profile_photo_url =
-        typeof profilePhotoUrl === "string" && profilePhotoUrl.trim().length > 0
-          ? profilePhotoUrl.trim()
-          : null;
-    }
-
-    const hasUserUpdates =
-      userUpdateData.full_name !== undefined ||
-      userUpdateData.phone !== undefined;
-
-    const hasProfileUpdates =
-      profileUpdateData.address !== undefined ||
-      profileUpdateData.bio !== undefined ||
-      profileUpdateData.years_of_experience !== undefined ||
-      profileUpdateData.profile_photo_url !== undefined;
-
-    if (!hasUserUpdates && !hasProfileUpdates) {
-      return response.status(400).json({
-        message: "No profile changes were provided",
-      });
-    }
-
-    await prisma.$transaction(async (transaction) => {
-      if (hasUserUpdates) {
-        await transaction.users.update({
-          where: {
-            id: providerId,
-          },
-          data: userUpdateData,
-        });
-      }
-
-      if (hasProfileUpdates) {
-        const providerProfile =
-          existingProvider.provider_profiles_provider_profiles_provider_idTousers;
-
-        if (providerProfile) {
-          await transaction.provider_profiles.update({
-            where: {
-              id: providerProfile.id,
-            },
-            data: profileUpdateData,
-          });
-        } else {
-          await transaction.provider_profiles.create({
-            data: {
-              provider_id: providerId,
-              address: profileUpdateData.address ?? null,
-              bio: profileUpdateData.bio ?? null,
-              years_of_experience: profileUpdateData.years_of_experience ?? 0,
-              profile_photo_url: profileUpdateData.profile_photo_url ?? null,
-              verification_status: "pending",
-              is_available: false,
-            },
-          });
-        }
-      }
-    });
-
-    const updatedProvider = await prisma.users.findUnique({
-      where: {
-        id: providerId,
-      },
-      select: {
-        id: true,
-        full_name: true,
-        phone: true,
-        email: true,
-        email_verified_at: true,
-        role_id: true,
-        is_active: true,
-        created_at: true,
-        updated_at: true,
-
-        provider_profiles_provider_profiles_provider_idTousers: {
-          select: {
-            id: true,
-            address: true,
-            profile_photo_url: true,
-            years_of_experience: true,
-            bio: true,
-            verification_status: true,
-            verification_note: true,
-            verified_at: true,
-            suspended_at: true,
-            rejection_reason: true,
-            average_rating: true,
-            total_reviews: true,
-            total_completed_jobs: true,
-            is_available: true,
-            created_at: true,
-            updated_at: true,
-          },
-        },
-      },
-    });
-
-    return response.status(200).json({
-      message: "Provider profile updated successfully",
-      provider: updatedProvider,
-    });
-  } catch (error) {
-    console.error("Update provider profile error:", error);
-
-    return response.status(500).json({
-      message: "Something went wrong while updating the provider profile",
-    });
-  }
-};
-/*
-|--------------------------------------------------------------------------
-| Public provider profile
-|--------------------------------------------------------------------------
-*/
-
-export const getProviderProfile = async (
-  request: Request,
-  response: Response,
-) => {
-  try {
-    const providerId = parsePositiveInteger(request.params.id);
-
-    if (!providerId) {
-      return response.status(400).json({
-        message: "Invalid provider ID",
-      });
-    }
-
-    const provider = await prisma.users.findFirst({
-      where: {
-        id: providerId,
-        is_active: true,
-        roles: {
-          name: ROLE_NAMES.PROVIDER,
-        },
-        provider_profiles_provider_profiles_provider_idTousers: {
-          is: {
-            verification_status: APPROVED_PROVIDER_STATUS,
-          },
-        },
-      },
-      select: {
-        id: true,
-        full_name: true,
-        created_at: true,
-
-        provider_profiles_provider_profiles_provider_idTousers: {
-          select: {
-            address: true,
-            profile_photo_url: true,
-            years_of_experience: true,
-            bio: true,
-            verification_status: true,
-            average_rating: true,
-            total_reviews: true,
-            total_completed_jobs: true,
-          },
-        },
-
-        provider_experience_types: {
-          select: {
-            id: true,
-            experience_type_id: true,
-            experience_types: {
-              select: {
-                id: true,
-                name: true,
-              },
-            },
-          },
-        },
-
-        reviews_reviews_provider_idTousers: {
-          where: {
-            is_visible: true,
-          },
-          select: {
-            id: true,
-            rating: true,
-            comment: true,
-            created_at: true,
-            users_reviews_customer_idTousers: {
-              select: {
-                id: true,
-                full_name: true,
-              },
-            },
-          },
-          orderBy: {
-            created_at: "desc",
-          },
-          take: 20,
-        },
-      },
-    });
-
-    if (!provider) {
-      return response.status(404).json({
-        message: "Approved provider not found",
-      });
-    }
-
-    const profile =
-      provider.provider_profiles_provider_profiles_provider_idTousers;
-
-    return response.status(200).json({
-      message: "Provider profile fetched successfully",
-      provider: {
-        id: provider.id,
-        full_name: provider.full_name,
-        joined_at: provider.created_at,
-
-        profile_photo_url: profile?.profile_photo_url ?? null,
-        address: profile?.address ?? null,
-        years_of_experience: profile?.years_of_experience ?? 0,
-        bio: profile?.bio ?? null,
-        verification_status: profile?.verification_status ?? null,
-        average_rating: profile?.average_rating ?? 0,
-        total_reviews: profile?.total_reviews ?? 0,
-        total_completed_jobs: profile?.total_completed_jobs ?? 0,
-
-        experiences: provider.provider_experience_types.map(
-          (providerExperience) => ({
-            id: providerExperience.id,
-            experience_type_id: providerExperience.experience_type_id,
-            name: providerExperience.experience_types.name,
-          }),
-        ),
-
-        reviews: provider.reviews_reviews_provider_idTousers.map((review) => ({
-          id: review.id,
-          rating: review.rating,
-          comment: review.comment,
-          created_at: review.created_at,
-          customer: {
-            id: review.users_reviews_customer_idTousers.id,
-            full_name: review.users_reviews_customer_idTousers.full_name,
-          },
-        })),
-      },
-    });
-  } catch (error: unknown) {
-    console.error("Get provider profile error:", error);
-
-    return response.status(500).json({
-      message: "Something went wrong while fetching the provider profile",
+      message: "Something went wrong while confirming cash payment",
     });
   }
 };
 
 /*
 |--------------------------------------------------------------------------
-| Public approved provider list
+| ONLINE PAYMENT HELPERS
 |--------------------------------------------------------------------------
 */
 
-export const getActiveProviders = async (
-  request: Request,
-  response: Response,
-) => {
-  try {
-    const page = Math.max(Number(request.query.page) || 1, 1);
+type SupportedOnlineMethod = "esewa" | "khalti" | "connectips";
 
-    const limit = Math.min(Math.max(Number(request.query.limit) || 20, 1), 100);
+function getPublicAppUrl() {
+  return (
+    process.env.APP_PUBLIC_URL?.replace(/\/+$/, "") || "http://localhost:8081"
+  );
+}
 
-    const search =
-      typeof request.query.search === "string"
-        ? request.query.search.trim()
-        : "";
+function money(value: unknown): number {
+  const parsed = Number(value);
 
-    const minimumRatingValue = Number(request.query.minimumRating);
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
 
-    const hasMinimumRating =
-      Number.isFinite(minimumRatingValue) &&
-      minimumRatingValue >= 0 &&
-      minimumRatingValue <= 5;
+  return Math.round(parsed * 100) / 100;
+}
 
-    const where = {
-      is_active: true,
+async function getCustomerOnlineBooking(
+  bookingId: number,
+  customerId: number,
+  expectedMethod: SupportedOnlineMethod,
+) {
+  const booking = await prisma.bookings.findFirst({
+    where: {
+      id: bookingId,
+      customer_id: customerId,
+    },
 
-      roles: {
-        name: ROLE_NAMES.PROVIDER,
-      },
+    select: {
+      id: true,
+      customer_id: true,
+      provider_id: true,
+      status: true,
+      payment_method: true,
+      final_price: true,
+      customer_payable_amount: true,
 
-      provider_profiles_provider_profiles_provider_idTousers: {
-        is: {
-          verification_status: APPROVED_PROVIDER_STATUS,
-
-          ...(hasMinimumRating
-            ? {
-                average_rating: {
-                  gte: minimumRatingValue,
-                },
-              }
-            : {}),
+      services: {
+        select: {
+          name: true,
         },
       },
 
-      ...(search
-        ? {
-            OR: [
-              {
-                full_name: {
-                  contains: search,
-                  mode: "insensitive" as const,
-                },
-              },
-              {
-                provider_profiles_provider_profiles_provider_idTousers: {
-                  is: {
-                    bio: {
-                      contains: search,
-                      mode: "insensitive" as const,
-                    },
-                  },
-                },
-              },
-            ],
-          }
-        : {}),
-    };
+      users_bookings_customer_idTousers: {
+        select: {
+          full_name: true,
+          phone: true,
+          email: true,
+        },
+      },
 
-    const [providers, total] = await prisma.$transaction([
-      prisma.users.findMany({
-        where,
-
+      payments: {
         select: {
           id: true,
-          full_name: true,
-          created_at: true,
-
-          provider_profiles_provider_profiles_provider_idTousers: {
-            select: {
-              address: true,
-              profile_photo_url: true,
-              years_of_experience: true,
-              bio: true,
-              verification_status: true,
-              average_rating: true,
-              total_reviews: true,
-              total_completed_jobs: true,
-            },
-          },
-
-          provider_experience_types: {
-            select: {
-              id: true,
-              experience_type_id: true,
-              experience_types: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
+          amount: true,
+          payment_method: true,
+          payment_status: true,
+          transaction_reference: true,
         },
+      },
+    },
+  });
 
-        orderBy: [
-          {
-            provider_profiles_provider_profiles_provider_idTousers: {
-              average_rating: "desc",
-            },
-          },
-          {
-            created_at: "desc",
-          },
-        ],
+  if (!booking) {
+    throw new Error("BOOKING_NOT_FOUND");
+  }
 
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
+  if (booking.status !== "completed") {
+    throw new Error("BOOKING_NOT_COMPLETED");
+  }
 
-      prisma.users.count({
-        where,
-      }),
-    ]);
+  if (booking.payment_method !== expectedMethod) {
+    throw new Error("PAYMENT_METHOD_MISMATCH");
+  }
 
-    return response.status(200).json({
-      message: "Approved providers fetched successfully",
+  if (booking.payments?.payment_status === "paid") {
+    throw new Error("PAYMENT_ALREADY_PAID");
+  }
 
-      providers: providers.map((provider) => {
-        const profile =
-          provider.provider_profiles_provider_profiles_provider_idTousers;
+  return booking;
+}
 
-        return {
-          id: provider.id,
-          full_name: provider.full_name,
-          joined_at: provider.created_at,
+function getBookingPaymentAmount(booking: {
+  final_price: unknown;
+  customer_payable_amount: unknown;
+  payments?: {
+    amount: unknown;
+  } | null;
+}) {
+  const amount = money(
+    booking.customer_payable_amount ??
+      booking.payments?.amount ??
+      booking.final_price ??
+      0,
+  );
 
-          profile_photo_url: profile?.profile_photo_url ?? null,
-          address: profile?.address ?? null,
-          years_of_experience: profile?.years_of_experience ?? 0,
-          bio: profile?.bio ?? null,
-          average_rating: profile?.average_rating ?? 0,
-          total_reviews: profile?.total_reviews ?? 0,
-          total_completed_jobs: profile?.total_completed_jobs ?? 0,
+  if (amount <= 0) {
+    throw new Error("INVALID_PAYMENT_AMOUNT");
+  }
 
-          experiences: provider.provider_experience_types.map(
-            (providerExperience) => ({
-              id: providerExperience.id,
-              experience_type_id: providerExperience.experience_type_id,
-              name: providerExperience.experience_types.name,
-            }),
-          ),
-        };
-      }),
+  return amount;
+}
 
-      pagination: {
-        page,
-        limit,
-        total,
-        total_pages: Math.ceil(total / limit),
+/*
+|--------------------------------------------------------------------------
+| ESEWA INITIATE
+|--------------------------------------------------------------------------
+*/
+
+export const initiateEsewaPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!bookingId) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const booking = await getCustomerOnlineBooking(
+      bookingId,
+      customerId,
+      "esewa",
+    );
+
+    const totalAmount = getBookingPaymentAmount(booking);
+
+    const transactionUuid = ["DWAAR", bookingId, Date.now()].join("-");
+
+    const productCode = process.env.ESEWA_PRODUCT_CODE || "EPAYTEST";
+
+    const secretKey = process.env.ESEWA_SECRET_KEY;
+
+    if (!secretKey) {
+      return response.status(500).json({
+        message: "eSewa payment configuration is missing",
+      });
+    }
+
+    const totalAmountText = totalAmount.toFixed(2);
+
+    const signedFieldNames = "total_amount,transaction_uuid,product_code";
+
+    const signaturePayload =
+      `total_amount=${totalAmountText},` +
+      `transaction_uuid=${transactionUuid},` +
+      `product_code=${productCode}`;
+
+    const signature = crypto
+      .createHmac("sha256", secretKey)
+      .update(signaturePayload)
+      .digest("base64");
+
+    const appUrl = getPublicAppUrl();
+
+    const isSandbox = process.env.ESEWA_ENV !== "production";
+
+    const paymentUrl = isSandbox
+      ? "https://rc-epay.esewa.com.np/api/epay/main/v2/form"
+      : "https://epay.esewa.com.np/api/epay/main/v2/form";
+
+    /*
+    |--------------------------------------------------------------------------
+    | Keep main payment pending.
+    |--------------------------------------------------------------------------
+    */
+
+    await prisma.payments.update({
+      where: {
+        booking_id: bookingId,
+      },
+      data: {
+        payment_status: "pending",
+        transaction_reference: transactionUuid,
+        paid_at: null,
+        updated_at: new Date(),
       },
     });
-  } catch (error: unknown) {
-    console.error("Get active providers error:", error);
 
-    return response.status(500).json({
-      message: "Something went wrong while fetching providers",
+    return response.status(200).json({
+      message: "eSewa payment initialized successfully",
+
+      gateway: "esewa",
+
+      payment_url: paymentUrl,
+
+      transaction_uuid: transactionUuid,
+
+      form: {
+        amount: totalAmountText,
+        tax_amount: "0",
+        total_amount: totalAmountText,
+        transaction_uuid: transactionUuid,
+
+        product_code: productCode,
+
+        product_service_charge: "0",
+        product_delivery_charge: "0",
+
+        success_url:
+          `${appUrl}/payment/${bookingId}` + `?method=esewa&result=success`,
+
+        failure_url:
+          `${appUrl}/payment/${bookingId}` + `?method=esewa&result=failed`,
+
+        signed_field_names: signedFieldNames,
+
+        signature,
+      },
     });
+  } catch (error) {
+    console.error("Initiate eSewa payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to initialize eSewa payment",
+    );
   }
 };
+
+/*
+|--------------------------------------------------------------------------
+| ESEWA VERIFY
+|--------------------------------------------------------------------------
+*/
+
+export const verifyEsewaPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!bookingId) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const booking = await getCustomerOnlineBooking(
+      bookingId,
+      customerId,
+      "esewa",
+    );
+
+    const amount = getBookingPaymentAmount(booking);
+
+    const transactionUuid = booking.payments?.transaction_reference;
+
+    if (!transactionUuid) {
+      return response.status(400).json({
+        message: "No eSewa payment attempt was found",
+      });
+    }
+
+    const productCode = process.env.ESEWA_PRODUCT_CODE || "EPAYTEST";
+
+    const isSandbox = process.env.ESEWA_ENV !== "production";
+
+    const statusBaseUrl = isSandbox
+      ? "https://uat.esewa.com.np/api/epay/transaction/status/"
+      : "https://epay.esewa.com.np/api/epay/transaction/status/";
+
+    const query = new URLSearchParams({
+      product_code: productCode,
+      total_amount: amount.toFixed(2),
+      transaction_uuid: transactionUuid,
+    });
+
+    const gatewayResponse = await fetch(
+      `${statusBaseUrl}?${query.toString()}`,
+      {
+        method: "GET",
+      },
+    );
+
+    if (!gatewayResponse.ok) {
+      throw new Error("ESEWA_STATUS_REQUEST_FAILED");
+    }
+
+    const statusData = (await gatewayResponse.json()) as {
+      status?: string;
+      ref_id?: string | null;
+      refId?: string | null;
+    };
+
+    const gatewayStatus = String(statusData.status || "").toUpperCase();
+
+    if (gatewayStatus !== "COMPLETE") {
+      return response.status(200).json({
+        message:
+          gatewayStatus === "PENDING"
+            ? "eSewa payment is still pending"
+            : "eSewa payment was not completed",
+
+        verified: false,
+        gateway_status: gatewayStatus || "UNKNOWN",
+
+        payment_status: "pending",
+      });
+    }
+
+    const reference = statusData.ref_id ?? statusData.refId ?? transactionUuid;
+
+    const result = await settleVerifiedOnlinePayment({
+      bookingId,
+      transactionReference: String(reference),
+    });
+
+    return response.status(200).json({
+      message: "eSewa payment verified successfully",
+
+      verified: true,
+      gateway_status: "COMPLETE",
+      payment_status: "paid",
+      payment: result.payment,
+    });
+  } catch (error) {
+    console.error("Verify eSewa payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to verify eSewa payment",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| KHALTI SHARED INITIATE
+|--------------------------------------------------------------------------
+*/
+
+async function initiateKhaltiGatewayPayment(params: {
+  bookingId: number;
+  customerId: number;
+  method: "khalti" | "connectips";
+}) {
+  const booking = await getCustomerOnlineBooking(
+    params.bookingId,
+    params.customerId,
+    params.method,
+  );
+
+  const amountNpr = getBookingPaymentAmount(booking);
+
+  /*
+  |--------------------------------------------------------------------------
+  | Khalti expects amount in paisa.
+  |--------------------------------------------------------------------------
+  */
+
+  const amountPaisa = Math.round(amountNpr * 100);
+
+  const secretKey = process.env.KHALTI_SECRET_KEY;
+
+  if (!secretKey) {
+    throw new Error("KHALTI_SECRET_KEY_MISSING");
+  }
+
+  const isSandbox = process.env.KHALTI_ENV !== "production";
+
+  const apiBaseUrl = isSandbox
+    ? "https://dev.khalti.com/api/v2"
+    : "https://khalti.com/api/v2";
+
+  const appUrl = getPublicAppUrl();
+
+  const returnUrl =
+    `${appUrl}/payment/${params.bookingId}` +
+    `?method=${params.method}` +
+    `&result=return`;
+
+  const customer = booking.users_bookings_customer_idTousers;
+
+  const payload: Record<string, unknown> = {
+    return_url: returnUrl,
+
+    website_url: appUrl,
+
+    amount: amountPaisa,
+
+    purchase_order_id: `DWAAR-${params.bookingId}`,
+
+    purchase_order_name: booking.services.name,
+
+    customer_info: {
+      name: customer.full_name,
+
+      ...(customer.email
+        ? {
+            email: customer.email,
+          }
+        : {}),
+
+      ...(customer.phone
+        ? {
+            phone: customer.phone,
+          }
+        : {}),
+    },
+  };
+
+  /*
+  |--------------------------------------------------------------------------
+  | ConnectIPS during development
+  |--------------------------------------------------------------------------
+  |
+  | We intentionally use Khalti KPG for this button for now.
+  | Khalti checkout supports connectIPS as a funding source.
+  |
+  | Direct NCHL integration will replace this after NCHL provides
+  | merchant credentials/APIs.
+  |--------------------------------------------------------------------------
+  */
+
+  const gatewayResponse = await fetch(`${apiBaseUrl}/epayment/initiate/`, {
+    method: "POST",
+
+    headers: {
+      Authorization: `Key ${secretKey}`,
+
+      "Content-Type": "application/json",
+    },
+
+    body: JSON.stringify(payload),
+  });
+
+  const data = (await gatewayResponse.json()) as {
+    pidx?: string;
+    payment_url?: string;
+    expires_at?: string;
+    expires_in?: number;
+    detail?: string;
+  };
+
+  if (!gatewayResponse.ok || !data.pidx || !data.payment_url) {
+    console.error("Khalti initiate response:", data);
+
+    throw new Error("KHALTI_INITIATE_FAILED");
+  }
+
+  await prisma.payments.update({
+    where: {
+      booking_id: params.bookingId,
+    },
+
+    data: {
+      payment_status: "pending",
+
+      transaction_reference: data.pidx,
+
+      paid_at: null,
+
+      updated_at: new Date(),
+    },
+  });
+
+  return {
+    gateway: params.method,
+
+    pidx: data.pidx,
+
+    payment_url: data.payment_url,
+
+    expires_at: data.expires_at ?? null,
+
+    expires_in: data.expires_in ?? null,
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| KHALTI INITIATE
+|--------------------------------------------------------------------------
+*/
+
+export const initiateKhaltiPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!bookingId) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const result = await initiateKhaltiGatewayPayment({
+      bookingId,
+      customerId,
+      method: "khalti",
+    });
+
+    return response.status(200).json({
+      message: "Khalti payment initialized successfully",
+
+      ...result,
+    });
+  } catch (error) {
+    console.error("Initiate Khalti payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to initialize Khalti payment",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| CONNECTIPS INITIATE
+|--------------------------------------------------------------------------
+*/
+
+export const initiateConnectIpsPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId) {
+      return response.status(401).json({
+        message: "User is not authenticated",
+      });
+    }
+
+    if (!bookingId) {
+      return response.status(400).json({
+        message: "Invalid booking ID",
+      });
+    }
+
+    const result = await initiateKhaltiGatewayPayment({
+      bookingId,
+      customerId,
+      method: "connectips",
+    });
+
+    return response.status(200).json({
+      message: "ConnectIPS checkout initialized successfully",
+
+      provider: "khalti_kpg",
+
+      ...result,
+    });
+  } catch (error) {
+    console.error("Initiate ConnectIPS payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to initialize ConnectIPS payment",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| KHALTI / CONNECTIPS LOOKUP
+|--------------------------------------------------------------------------
+*/
+
+async function verifyKhaltiGatewayPayment(params: {
+  bookingId: number;
+  customerId: number;
+  method: "khalti" | "connectips";
+}) {
+  const booking = await getCustomerOnlineBooking(
+    params.bookingId,
+    params.customerId,
+    params.method,
+  );
+
+  const pidx = booking.payments?.transaction_reference;
+
+  if (!pidx) {
+    throw new Error("KHALTI_PAYMENT_ATTEMPT_NOT_FOUND");
+  }
+
+  const secretKey = process.env.KHALTI_SECRET_KEY;
+
+  if (!secretKey) {
+    throw new Error("KHALTI_SECRET_KEY_MISSING");
+  }
+
+  const isSandbox = process.env.KHALTI_ENV !== "production";
+
+  const apiBaseUrl = isSandbox
+    ? "https://dev.khalti.com/api/v2"
+    : "https://khalti.com/api/v2";
+
+  const gatewayResponse = await fetch(`${apiBaseUrl}/epayment/lookup/`, {
+    method: "POST",
+
+    headers: {
+      Authorization: `Key ${secretKey}`,
+
+      "Content-Type": "application/json",
+    },
+
+    body: JSON.stringify({
+      pidx,
+    }),
+  });
+
+  const data = (await gatewayResponse.json()) as {
+    pidx?: string;
+    total_amount?: number;
+    status?: string;
+    transaction_id?: string | null;
+    refunded?: boolean;
+  };
+
+  if (!gatewayResponse.ok) {
+    console.error("Khalti lookup response:", data);
+
+    throw new Error("KHALTI_LOOKUP_FAILED");
+  }
+
+  const expectedPaisa = Math.round(getBookingPaymentAmount(booking) * 100);
+
+  const returnedPaisa = Number(data.total_amount ?? 0);
+
+  const gatewayStatus = String(data.status || "");
+
+  if (gatewayStatus !== "Completed") {
+    return {
+      verified: false,
+
+      gateway_status: gatewayStatus || "Unknown",
+
+      payment_status: "pending" as const,
+    };
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | Amount must match.
+  |--------------------------------------------------------------------------
+  */
+
+  if (returnedPaisa !== expectedPaisa) {
+    throw new Error("GATEWAY_AMOUNT_MISMATCH");
+  }
+
+  const transactionReference = data.transaction_id || data.pidx || pidx;
+
+  const settlement = await settleVerifiedOnlinePayment({
+    bookingId: params.bookingId,
+
+    transactionReference,
+  });
+
+  return {
+    verified: true,
+
+    gateway_status: "Completed",
+
+    payment_status: "paid" as const,
+
+    payment: settlement.payment,
+  };
+}
+
+/*
+|--------------------------------------------------------------------------
+| KHALTI VERIFY
+|--------------------------------------------------------------------------
+*/
+
+export const verifyKhaltiPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId || !bookingId) {
+      return response.status(400).json({
+        message: "Invalid payment request",
+      });
+    }
+
+    const result = await verifyKhaltiGatewayPayment({
+      bookingId,
+      customerId,
+      method: "khalti",
+    });
+
+    return response.status(200).json({
+      message: result.verified
+        ? "Khalti payment verified successfully"
+        : "Khalti payment has not completed",
+
+      ...result,
+    });
+  } catch (error) {
+    console.error("Verify Khalti payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to verify Khalti payment",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| CONNECTIPS VERIFY
+|--------------------------------------------------------------------------
+*/
+
+export const verifyConnectIpsPayment = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const customerId = request.user?.userId;
+
+    const bookingId = parseBookingId(request.params.bookingId);
+
+    if (!customerId || !bookingId) {
+      return response.status(400).json({
+        message: "Invalid payment request",
+      });
+    }
+
+    const result = await verifyKhaltiGatewayPayment({
+      bookingId,
+      customerId,
+      method: "connectips",
+    });
+
+    return response.status(200).json({
+      message: result.verified
+        ? "ConnectIPS payment verified successfully"
+        : "ConnectIPS payment has not completed",
+
+      provider: "khalti_kpg",
+
+      ...result,
+    });
+  } catch (error) {
+    console.error("Verify ConnectIPS payment error:", error);
+
+    return handleGatewayError(
+      response,
+      error,
+      "Unable to verify ConnectIPS payment",
+    );
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| COMMON GATEWAY ERROR RESPONSE
+|--------------------------------------------------------------------------
+*/
+
+function handleGatewayError(
+  response: Response,
+  error: unknown,
+  fallback: string,
+) {
+  if (!(error instanceof Error)) {
+    return response.status(500).json({
+      message: fallback,
+    });
+  }
+
+  switch (error.message) {
+    case "BOOKING_NOT_FOUND":
+      return response.status(404).json({
+        message: "Booking not found",
+      });
+
+    case "BOOKING_NOT_COMPLETED":
+      return response.status(409).json({
+        message:
+          "Online payment can only be completed after the service is completed",
+      });
+
+    case "PAYMENT_METHOD_MISMATCH":
+      return response.status(400).json({
+        message:
+          "This payment gateway does not match the booking payment method",
+      });
+
+    case "PAYMENT_ALREADY_PAID":
+      return response.status(409).json({
+        message: "This booking has already been paid",
+      });
+
+    case "INVALID_PAYMENT_AMOUNT":
+      return response.status(400).json({
+        message: "The payment amount is invalid",
+      });
+
+    case "KHALTI_SECRET_KEY_MISSING":
+      return response.status(503).json({
+        message: "Khalti sandbox has not been configured yet",
+      });
+
+    case "GATEWAY_AMOUNT_MISMATCH":
+      return response.status(409).json({
+        message: "Payment amount verification failed",
+      });
+
+    default:
+      return response.status(500).json({
+        message: fallback,
+      });
+  }
+}

@@ -16,6 +16,7 @@ import {
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { chatImageUpload } from "../middlewares/chat-image-upload.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
+import { verifyFileSignature } from "../middlewares/verify-file-signature.middleware";
 
 const router = Router();
 
@@ -87,6 +88,7 @@ router.post(
   authenticateUser,
   allowRoles(ROLE_NAMES.CUSTOMER, ROLE_NAMES.PROVIDER),
   chatImageUpload.single("image"),
+  verifyFileSignature,
   sendOrderChatImageMessage,
 );
 
@@ -134,7 +136,7 @@ router.post(
 router.get(
   "/quick-replies",
   authenticateUser,
-  allowRoles(ROLE_NAMES.PROVIDER),
+  allowRoles(ROLE_NAMES.CUSTOMER, ROLE_NAMES.PROVIDER),
   getProviderQuickReplies,
 );
 

@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
 import { prisma } from "../config/prisma";
 import { ROLE_NAMES } from "../constants/roles";
+import { validateEmailIsUsable } from "../utils/email-validation";
 
 const APPROVED_PROVIDER_STATUS = "approved";
 
@@ -203,6 +204,7 @@ export const updateMyProviderProfile = async (
     const {
       fullName,
       phone,
+      email,
       address,
       bio,
       yearsOfExperience,
@@ -237,6 +239,8 @@ export const updateMyProviderProfile = async (
     const userUpdateData: {
       full_name?: string;
       phone?: string;
+      email?: string;
+      email_verified_at?: null;
       updated_at: Date;
     } = {
       updated_at: new Date(),
@@ -304,6 +308,49 @@ export const updateMyProviderProfile = async (
       userUpdateData.phone = normalizedPhone;
     }
 
+    if (email !== undefined) {
+      if (typeof email !== "string" || !email.trim()) {
+        return response.status(400).json({
+          message: "Enter a valid email address",
+          field: "email",
+        });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+
+      const emailCheck = await validateEmailIsUsable(normalizedEmail);
+
+      if (!emailCheck.valid) {
+        return response.status(400).json({
+          message: emailCheck.reason,
+          field: "email",
+        });
+      }
+
+      const emailAlreadyExists = await prisma.users.findFirst({
+        where: {
+          email: normalizedEmail,
+          role_id: request.user?.roleId,
+          NOT: {
+            id: providerId,
+          },
+        },
+        select: {
+          id: true,
+        },
+      });
+
+      if (emailAlreadyExists) {
+        return response.status(409).json({
+          message: "This email is already used by another provider account",
+          field: "email",
+        });
+      }
+
+      userUpdateData.email = normalizedEmail;
+      userUpdateData.email_verified_at = null;
+    }
+
     if (address !== undefined) {
       if (
         address !== null &&
@@ -369,7 +416,8 @@ export const updateMyProviderProfile = async (
 
     const hasUserUpdates =
       userUpdateData.full_name !== undefined ||
-      userUpdateData.phone !== undefined;
+      userUpdateData.phone !== undefined ||
+      userUpdateData.email !== undefined;
 
     const hasProfileUpdates =
       profileUpdateData.address !== undefined ||

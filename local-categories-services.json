@@ -1,0 +1,160 @@
+{
+  "categories": [
+    {
+      "id": 1,
+      "name": "AC Services",
+      "slug": "ac-services",
+      "description": "Professional AC repair, installation and maintenance services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 1,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 2,
+      "name": "Plumbing Services",
+      "slug": "plumbing-services",
+      "description": "Professional plumbing, leakage repair and pipe maintenance services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 2,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 3,
+      "name": "Electrical Services",
+      "slug": "electrical-services",
+      "description": "Household electrical inspection, installation and repair services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 3,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 4,
+      "name": "Cleaning Services",
+      "slug": "cleaning-services",
+      "description": "Reliable home, kitchen, bathroom and general cleaning services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 4,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 5,
+      "name": "Appliance Repair",
+      "slug": "appliance-repair",
+      "description": "Repair and maintenance services for household appliances.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 5,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 6,
+      "name": "Carpentry Services",
+      "slug": "carpentry-services",
+      "description": "Furniture repair, woodwork and general carpentry services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 6,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 7,
+      "name": "Painting Services",
+      "slug": "painting-services",
+      "description": "Interior and exterior residential painting services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 7,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 8,
+      "name": "Water Purifier Services",
+      "slug": "water-purifier-services",
+      "description": "Water purifier installation, servicing and repair.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 8,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    },
+    {
+      "id": 9,
+      "name": "Pest Control",
+      "slug": "pest-control",
+      "description": "Professional pest inspection and pest control services.",
+      "image_url": null,
+      "is_active": true,
+      "display_order": 9,
+      "created_at": "2026-07-03T01:17:39.975Z",
+      "updated_at": "2026-07-03T01:17:39.975Z"
+    }
+  ],
+  "services": [
+    {
+      "id": 1,
+      "name": "Plumbing",
+      "description": "Basic pipe, tap and water leakage repair service",
+      "base_price": "500",
+      "duration_minutes": 60,
+      "is_active": true,
+      "created_at": "2026-06-20T16:19:23.359Z",
+      "updated_at": "2026-07-03T07:30:17.552Z",
+      "category_id": 2
+    },
+    {
+      "id": 2,
+      "name": "Electrical Repair",
+      "description": "Basic household electrical inspection and repair service",
+      "base_price": "500",
+      "duration_minutes": 60,
+      "is_active": true,
+      "created_at": "2026-06-20T16:19:23.359Z",
+      "updated_at": "2026-06-20T16:19:23.359Z",
+      "category_id": 3
+    },
+    {
+      "id": 3,
+      "name": "Home Cleaning",
+      "description": "Basic home cleaning service",
+      "base_price": "1000",
+      "duration_minutes": 120,
+      "is_active": true,
+      "created_at": "2026-06-20T16:19:23.359Z",
+      "updated_at": "2026-07-03T08:16:58.762Z",
+      "category_id": 4
+    },
+    {
+      "id": 4,
+      "name": "Test Plumbing Service",
+      "description": "Testing service for the complete booking workflow",
+      "base_price": "700",
+      "duration_minutes": 60,
+      "is_active": true,
+      "created_at": "2026-06-20T22:15:40.410Z",
+      "updated_at": "2026-07-03T08:56:40.775Z",
+      "category_id": 2
+    },
+    {
+      "id": 5,
+      "name": "ac repair",
+      "description": "ac",
+      "base_price": "1200",
+      "duration_minutes": 88,
+      "is_active": true,
+      "created_at": "2026-06-20T23:53:38.028Z",
+      "updated_at": "2026-07-03T07:56:41.606Z",
+      "category_id": 1
+    }
+  ]
+}

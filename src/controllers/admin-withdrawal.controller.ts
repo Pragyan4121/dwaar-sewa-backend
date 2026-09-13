@@ -358,6 +358,9 @@ export const approveWithdrawalForAdmin = async (
 |--------------------------------------------------------------------------
 | Admin: Mark approved withdrawal as paid
 |--------------------------------------------------------------------------
+|
+| Wallet is deducted ONLY when admin marks the withdrawal paid.
+|--------------------------------------------------------------------------
 */
 
 export const markWithdrawalPaidForAdmin = async (
@@ -385,43 +388,175 @@ export const markWithdrawalPaidForAdmin = async (
 
     const now = new Date();
 
-    const updateResult = await prisma.withdrawals.updateMany({
-      where: {
-        id: withdrawalId,
-        status: "approved",
-      },
+    const result = await prisma.$transaction(async (transaction) => {
+      const withdrawal = await transaction.withdrawals.findFirst({
+        where: {
+          id: withdrawalId,
+          status: "approved",
+        },
 
-      data: {
-        status: "paid",
-        ...(adminNote
-          ? {
-              admin_note: adminNote,
-            }
-          : {}),
-        processed_by: adminId,
-        processed_at: now,
-        updated_at: now,
-      },
+        select: {
+          id: true,
+          provider_id: true,
+          wallet_id: true,
+          amount: true,
+          status: true,
+        },
+      });
+
+      if (!withdrawal) {
+        throw new Error("WITHDRAWAL_NOT_PAYABLE");
+      }
+
+      const amount = Math.round(Number(withdrawal.amount) * 100) / 100;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Claim withdrawal exactly once
+      |--------------------------------------------------------------------------
+      */
+
+      const statusUpdate = await transaction.withdrawals.updateMany({
+        where: {
+          id: withdrawalId,
+          status: "approved",
+        },
+
+        data: {
+          status: "paid",
+
+          ...(adminNote
+            ? {
+                admin_note: adminNote,
+              }
+            : {}),
+
+          processed_by: adminId,
+          processed_at: now,
+          updated_at: now,
+        },
+      });
+
+      if (statusUpdate.count !== 1) {
+        throw new Error("WITHDRAWAL_NOT_PAYABLE");
+      }
+
+      /*
+      |--------------------------------------------------------------------------
+      | Deduct provider wallet only when payout is completed
+      |--------------------------------------------------------------------------
+      */
+
+      const walletUpdateResult = await transaction.wallets.updateMany({
+        where: {
+          id: withdrawal.wallet_id,
+          is_active: true,
+
+          balance: {
+            gte: amount,
+          },
+        },
+
+        data: {
+          balance: {
+            decrement: amount,
+          },
+
+          updated_at: now,
+        },
+      });
+
+      if (walletUpdateResult.count !== 1) {
+        throw new Error("INSUFFICIENT_WALLET_BALANCE");
+      }
+
+      const updatedWallet = await transaction.wallets.findUnique({
+        where: {
+          id: withdrawal.wallet_id,
+        },
+
+        select: {
+          id: true,
+          balance: true,
+          currency: true,
+          is_active: true,
+        },
+      });
+
+      if (!updatedWallet) {
+        throw new Error("WALLET_NOT_FOUND");
+      }
+
+      const balanceAfter =
+        Math.round(Number(updatedWallet.balance) * 100) / 100;
+
+      const balanceBefore = Math.round((balanceAfter + amount) * 100) / 100;
+
+      /*
+      |--------------------------------------------------------------------------
+      | Wallet ledger
+      |--------------------------------------------------------------------------
+      */
+
+      const walletTransaction = await transaction.wallet_transactions.create({
+        data: {
+          wallet_id: withdrawal.wallet_id,
+          booking_id: null,
+          transaction_type: "debit",
+          source_type: "withdrawal_paid",
+          amount: amount.toFixed(2),
+          balance_before: balanceBefore.toFixed(2),
+          balance_after: balanceAfter.toFixed(2),
+          description: `Paid withdrawal request #${withdrawalId}`,
+          created_at: now,
+        },
+      });
+
+      const paidWithdrawal = await transaction.withdrawals.findUnique({
+        where: {
+          id: withdrawalId,
+        },
+      });
+
+      return {
+        withdrawal: paidWithdrawal,
+        wallet: updatedWallet,
+        walletTransaction,
+      };
     });
 
-    if (updateResult.count !== 1) {
+    return response.status(200).json({
+      message: "Withdrawal marked as paid successfully",
+      withdrawal: result.withdrawal,
+      wallet: {
+        balance: result.wallet.balance,
+        currency: result.wallet.currency,
+      },
+    });
+  } catch (error) {
+    console.error("Mark withdrawal paid error:", error);
+
+    if (error instanceof Error && error.message === "WITHDRAWAL_NOT_PAYABLE") {
       return response.status(409).json({
         message: "Only an approved withdrawal can be marked as paid",
       });
     }
 
-    const withdrawal = await prisma.withdrawals.findUnique({
-      where: {
-        id: withdrawalId,
-      },
-    });
+    if (
+      error instanceof Error &&
+      error.message === "INSUFFICIENT_WALLET_BALANCE"
+    ) {
+      return response.status(409).json({
+        message:
+          "Provider wallet no longer has enough balance to complete this withdrawal.",
+      });
+    }
 
-    return response.status(200).json({
-      message: "Withdrawal marked as paid successfully",
-      withdrawal,
-    });
-  } catch (error) {
-    console.error("Mark withdrawal paid error:", error);
+    if (error instanceof Error && error.message === "WALLET_NOT_FOUND") {
+      return response.status(404).json({
+        message: "Provider wallet not found",
+      });
+    }
 
     return response.status(500).json({
       message: "Something went wrong while marking the withdrawal as paid",
@@ -431,7 +566,11 @@ export const markWithdrawalPaidForAdmin = async (
 
 /*
 |--------------------------------------------------------------------------
-| Admin: Reject withdrawal and refund wallet
+| Admin: Reject withdrawal request
+|--------------------------------------------------------------------------
+|
+| No wallet refund is required because withdrawal requests no longer deduct
+| the wallet when they are created.
 |--------------------------------------------------------------------------
 */
 
@@ -470,15 +609,14 @@ export const rejectWithdrawalForAdmin = async (
       const withdrawal = await transaction.withdrawals.findFirst({
         where: {
           id: withdrawalId,
+
           status: {
             in: ["pending", "approved"],
           },
         },
+
         select: {
           id: true,
-          provider_id: true,
-          wallet_id: true,
-          amount: true,
           status: true,
         },
       });
@@ -487,17 +625,12 @@ export const rejectWithdrawalForAdmin = async (
         throw new Error("WITHDRAWAL_NOT_REJECTABLE");
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Claim withdrawal for rejection
-      |--------------------------------------------------------------------------
-      */
-
       const updateResult = await transaction.withdrawals.updateMany({
         where: {
           id: withdrawalId,
           status: withdrawal.status,
         },
+
         data: {
           status: "rejected",
           admin_note: adminNote,
@@ -511,105 +644,18 @@ export const rejectWithdrawalForAdmin = async (
         throw new Error("WITHDRAWAL_NOT_REJECTABLE");
       }
 
-      /*
-      |--------------------------------------------------------------------------
-      | Get wallet
-      |--------------------------------------------------------------------------
-      */
-
-      const wallet = await transaction.wallets.findUnique({
-        where: {
-          id: withdrawal.wallet_id,
-        },
-        select: {
-          id: true,
-          balance: true,
-          currency: true,
-          is_active: true,
-        },
-      });
-
-      if (!wallet) {
-        throw new Error("WALLET_NOT_FOUND");
-      }
-
-      const amount = Math.round(Number(withdrawal.amount) * 100) / 100;
-
-      /*
-      |--------------------------------------------------------------------------
-      | Atomically restore withdrawal amount
-      |--------------------------------------------------------------------------
-      */
-
-      const updatedWallet = await transaction.wallets.update({
-        where: {
-          id: wallet.id,
-        },
-        data: {
-          balance: {
-            increment: amount,
-          },
-          updated_at: now,
-        },
-        select: {
-          id: true,
-          balance: true,
-          currency: true,
-          is_active: true,
-        },
-      });
-
-      const balanceAfter =
-        Math.round(Number(updatedWallet.balance) * 100) / 100;
-
-      const balanceBefore = Math.round((balanceAfter - amount) * 100) / 100;
-
-      /*
-      |--------------------------------------------------------------------------
-      | Record wallet refund transaction
-      |--------------------------------------------------------------------------
-      */
-
-      const walletTransaction = await transaction.wallet_transactions.create({
-        data: {
-          wallet_id: wallet.id,
-          booking_id: null,
-          transaction_type: "credit",
-          source_type: "withdrawal_refund",
-          amount: amount.toFixed(2),
-          balance_before: balanceBefore.toFixed(2),
-          balance_after: balanceAfter.toFixed(2),
-          description: `Refund for rejected withdrawal request #${withdrawalId}`,
-          created_at: now,
-        },
-      });
-
-      /*
-      |--------------------------------------------------------------------------
-      | Return updated withdrawal
-      |--------------------------------------------------------------------------
-      */
-
       const rejectedWithdrawal = await transaction.withdrawals.findUnique({
         where: {
           id: withdrawalId,
         },
       });
 
-      return {
-        withdrawal: rejectedWithdrawal,
-        wallet: updatedWallet,
-        walletTransaction,
-      };
+      return rejectedWithdrawal;
     });
 
     return response.status(200).json({
-      message: "Withdrawal rejected and wallet refunded successfully",
-      withdrawal: result.withdrawal,
-      wallet: {
-        balance: result.wallet.balance,
-        currency: result.wallet.currency,
-      },
+      message: "Withdrawal request rejected successfully",
+      withdrawal: result,
     });
   } catch (error) {
     console.error("Reject withdrawal error:", error);
@@ -620,12 +666,6 @@ export const rejectWithdrawalForAdmin = async (
     ) {
       return response.status(409).json({
         message: "Only a pending or approved withdrawal can be rejected",
-      });
-    }
-
-    if (error instanceof Error && error.message === "WALLET_NOT_FOUND") {
-      return response.status(404).json({
-        message: "Provider wallet not found",
       });
     }
 

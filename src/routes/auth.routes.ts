@@ -5,6 +5,7 @@ import {
   getCurrentSession,
   getProviderModeStatus,
   loginAdmin,
+  logoutAdmin,
   loginCustomer,
   loginProvider,
   registerCustomer,
@@ -20,6 +21,10 @@ import {
 } from "../controllers/auth.controller";
 import { authenticateUser } from "../middlewares/auth.middleware";
 import { allowRoles } from "../middlewares/role.middleware";
+import {
+  loginRateLimiter,
+  otpRateLimiter,
+} from "../middlewares/rate-limit.middleware";
 const router = Router();
 
 /*
@@ -52,14 +57,20 @@ router.get(
 |--------------------------------------------------------------------------
 */
 
-router.post("/admin/login", loginAdmin);
+router.post("/admin/login", loginRateLimiter, loginAdmin);
+router.post("/admin/logout", logoutAdmin);
 router.post("/customer/register", registerCustomer);
 
-router.post("/customer/login", loginCustomer);
-router.post("/customer/forgot-password", forgotCustomerPassword);
+router.post("/customer/login", loginRateLimiter, loginCustomer);
+router.post(
+  "/customer/forgot-password",
+  otpRateLimiter,
+  forgotCustomerPassword,
+);
 
 router.post(
   "/customer/verify-password-reset-otp",
+  otpRateLimiter,
   verifyCustomerPasswordResetOtp,
 );
 
@@ -72,14 +83,27 @@ router.post("/customer/reset-password", resetCustomerPassword);
 */
 
 router.post("/provider/register", registerProvider);
-router.post("/provider/verify-email", verifyProviderRegistrationOtp);
+router.post(
+  "/provider/verify-email",
+  otpRateLimiter,
+  verifyProviderRegistrationOtp,
+);
 
-router.post("/provider/resend-verification-otp", resendProviderRegistrationOtp);
+router.post(
+  "/provider/resend-verification-otp",
+  otpRateLimiter,
+  resendProviderRegistrationOtp,
+);
 
-router.post("/provider/login", loginProvider);
-router.post("/provider/forgot-password", forgotProviderPassword);
+router.post("/provider/login", loginRateLimiter, loginProvider);
+router.post(
+  "/provider/forgot-password",
+  otpRateLimiter,
+  forgotProviderPassword,
+);
 router.post(
   "/provider/verify-password-reset-otp",
+  otpRateLimiter,
   verifyProviderPasswordResetOtp,
 );
 router.post("/provider/reset-password", resetProviderPassword);
