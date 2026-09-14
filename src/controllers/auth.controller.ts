@@ -88,8 +88,19 @@ function setAuthCookie(response: Response, token: string): void {
 
   response.cookie("adminToken", token, {
     httpOnly: true,
+    // The admin panel and this API are deployed on different Render
+    // subdomains (e.g. dwaar-sewa-admin.onrender.com calling
+    // dwaar-sewa-backend.onrender.com). Browsers treat different
+    // subdomains of onrender.com as different *sites* (Render is on the
+    // public suffix list for exactly this reason), so this is a
+    // cross-site request from the cookie's point of view.
+    // SameSite=None is required for a cross-site cookie to be sent at
+    // all, and browsers refuse SameSite=None without Secure, so
+    // `secure` has to be true whenever we use "none" — not just in
+    // production. Locally (same-origin http://localhost), fall back to
+    // "lax" so the cookie still works without HTTPS.
     secure: isProduction,
-    sameSite: "strict",
+    sameSite: isProduction ? "none" : "lax",
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: "/",
   });
@@ -2336,10 +2347,12 @@ export const loginAdmin = async (request: Request, response: Response) => {
 */
 
 export const logoutAdmin = async (_request: Request, response: Response) => {
+  const isProduction = process.env.NODE_ENV === "production";
+
   response.clearCookie("adminToken", {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "strict",
+    secure: isProduction,
+    sameSite: isProduction ? "none" : "lax",
     path: "/",
   });
 
