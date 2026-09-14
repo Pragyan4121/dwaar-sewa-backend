@@ -50,6 +50,17 @@ dotenv.config();
 
 const app = express();
 
+/*
+ * Render (and most PaaS providers) terminate HTTPS at a load balancer
+ * in front of the app, then forward plain HTTP internally along with an
+ * X-Forwarded-Proto header. Without this, Express's req.secure is always
+ * false — even for real HTTPS visitors — which would make the
+ * request.secure check in the admin cookie logic below always fall back
+ * to the insecure/SameSite=Lax branch, breaking cross-subdomain login no
+ * matter what NODE_ENV is set to.
+ */
+app.set("trust proxy", 1);
+
 const httpServer = http.createServer(app);
 
 const PORT = Number(process.env.PORT) || 3000;

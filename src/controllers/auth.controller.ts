@@ -83,8 +83,17 @@ function validatePassword(
 const MAX_FAILED_LOGIN_ATTEMPTS = 10;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 
-function setAuthCookie(response: Response, token: string): void {
-  const isProduction = process.env.NODE_ENV === "production";
+function setAuthCookie(
+  request: Request,
+  response: Response,
+  token: string,
+): void {
+  // Determined from the real request (via the X-Forwarded-Proto header,
+  // see app.set("trust proxy", 1) in server.ts) rather than NODE_ENV,
+  // since NODE_ENV isn't guaranteed to be set correctly on every hosting
+  // provider and getting this wrong silently breaks cross-subdomain
+  // login instead of throwing an obvious error.
+  const isHttps = request.secure;
 
   response.cookie("adminToken", token, {
     httpOnly: true,
@@ -96,11 +105,11 @@ function setAuthCookie(response: Response, token: string): void {
     // cross-site request from the cookie's point of view.
     // SameSite=None is required for a cross-site cookie to be sent at
     // all, and browsers refuse SameSite=None without Secure, so
-    // `secure` has to be true whenever we use "none" — not just in
-    // production. Locally (same-origin http://localhost), fall back to
-    // "lax" so the cookie still works without HTTPS.
-    secure: isProduction,
-    sameSite: isProduction ? "none" : "lax",
+    // `secure` has to be true whenever we use "none". Locally
+    // (same-origin http://localhost), fall back to "lax" so the cookie
+    // still works without HTTPS.
+    secure: isHttps,
+    sameSite: isHttps ? "none" : "lax",
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: "/",
   });
@@ -2308,7 +2317,7 @@ export const loginAdmin = async (request: Request, response: Response) => {
       roleName: ROLE_NAMES.ADMIN,
     });
 
-    setAuthCookie(response, token);
+    setAuthCookie(request, response, token);
 
     return response.status(200).json({
       message: "Admin login successful",
@@ -2346,13 +2355,13 @@ export const loginAdmin = async (request: Request, response: Response) => {
 |--------------------------------------------------------------------------
 */
 
-export const logoutAdmin = async (_request: Request, response: Response) => {
-  const isProduction = process.env.NODE_ENV === "production";
+export const logoutAdmin = async (request: Request, response: Response) => {
+  const isHttps = request.secure;
 
   response.clearCookie("adminToken", {
     httpOnly: true,
-    secure: isProduction,
-    sameSite: isProduction ? "none" : "lax",
+    secure: isHttps,
+    sameSite: isHttps ? "none" : "lax",
     path: "/",
   });
 
