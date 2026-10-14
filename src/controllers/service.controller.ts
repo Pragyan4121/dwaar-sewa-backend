@@ -147,9 +147,27 @@ export const getActiveServiceById = async (
       });
     }
 
+    /*
+     * video_consultation_price isn't in the generated Prisma Client's
+     * `services` select type yet — same reasoning as everywhere else in
+     * this feature (see consultation-credit.service.ts). Merged in here
+     * so the booking screen knows whether to offer a video-consultation
+     * option for this service at all.
+     */
+    const [priceRow] = await prisma.$queryRaw<
+      Array<{ video_consultation_price: string | null }>
+    >`
+      SELECT video_consultation_price
+      FROM services
+      WHERE id = ${service.id}
+    `;
+
     return response.status(200).json({
       message: "Service fetched successfully",
-      service,
+      service: {
+        ...service,
+        video_consultation_price: priceRow?.video_consultation_price ?? null,
+      },
     });
   } catch (error) {
     console.error("Get service by ID error:", error);

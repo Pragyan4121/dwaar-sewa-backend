@@ -2067,10 +2067,12 @@ export const loginProvider = async (request: Request, response: Response) => {
       provider.password_hash,
     );
 
-    if (!provider) {
+    if (!passwordMatches) {
+      // Same message/status as the "account not found" branch above —
+      // see the enumeration-hardening comment on the customer login
+      // flow in user.controller.ts for why.
       return response.status(401).json({
-        message: "No provider account found with this email or phone number",
-        field: "email",
+        message: "Invalid provider credentials",
       });
     }
 
@@ -2299,8 +2301,7 @@ export const loginAdmin = async (request: Request, response: Response) => {
       `;
 
       return response.status(401).json({
-        message: "Incorrect password",
-        field: "password",
+        message: "Invalid admin credentials",
       });
     }
 

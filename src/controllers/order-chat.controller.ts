@@ -301,6 +301,37 @@ export const getOrderChat = async (
       room.archived_at === null &&
       isOrderChatActiveStatus(room.bookings.status);
 
+    /*
+     * booking_type / consultation_outcome aren't in the generated
+     * Prisma Client's `bookings` select type yet (see
+     * consultation-credit.service.ts for why) — fetched via raw SQL and
+     * merged in below rather than added to the select above. Exposed
+     * here so the chat screens can decide whether to offer a "Start
+     * Video Consultation" option: only when this is a paid
+     * video_consultation booking with no outcome recorded yet — the
+     * same condition chat-socket.service.ts's isEligibleForVideoCall
+     * enforces server-side, so the client-side gate and the server-side
+     * gate can't drift out of sync in a way that just confuses the
+     * user (the server remains the real authority either way).
+     */
+    const [consultationRow] = await prisma.$queryRaw<
+      Array<{
+        booking_type: string;
+        consultation_outcome: string | null;
+        payment_status: string | null;
+      }>
+    >`
+      SELECT b.booking_type, b.consultation_outcome, p.payment_status
+      FROM bookings b
+      LEFT JOIN payments p ON p.booking_id = b.id
+      WHERE b.id = ${room.bookings.id}
+    `;
+
+    const canStartVideoConsultation =
+      consultationRow?.booking_type === "video_consultation" &&
+      consultationRow?.consultation_outcome === null &&
+      consultationRow?.payment_status === "paid";
+
     return response.status(200).json({
       message: "Order chat fetched successfully",
 
@@ -325,7 +356,11 @@ export const getOrderChat = async (
 
         is_archived: !isActive,
 
-        booking: room.bookings,
+        booking: {
+          ...room.bookings,
+          booking_type: consultationRow?.booking_type ?? "home_visit",
+          can_start_video_consultation: canStartVideoConsultation,
+        },
 
         messages: room.chat_messages,
       },

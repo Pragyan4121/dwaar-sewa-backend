@@ -14,6 +14,7 @@ import {
   otpRateLimiter,
   paymentRateLimiter,
 } from "./middlewares/rate-limit.middleware";
+import { requireCustomHeaderForCookieAuth } from "./middlewares/csrf.middleware";
 
 import adminCustomerRoutes from "./routes/admin-customer.routes";
 import adminDashboardRoutes from "./routes/admin-dashboard.routes";
@@ -101,6 +102,14 @@ app.use(
 );
 
 app.use(cookieParser());
+
+/*
+ * CSRF mitigation for the cookie-authenticated admin panel — see
+ * csrf.middleware.ts for the full rationale. This must run after
+ * cookieParser() (needs req.cookies) and before any route that mutates
+ * state.
+ */
+app.use(requireCustomHeaderForCookieAuth);
 
 app.use(express.json());
 
@@ -284,7 +293,7 @@ app.use(errorHandler);
 |--------------------------------------------------------------------------
 */
 
-initializeChatSocket(httpServer);
+initializeChatSocket(httpServer, allowedOrigins);
 
 /*
 |--------------------------------------------------------------------------

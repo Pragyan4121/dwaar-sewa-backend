@@ -778,3 +778,145 @@ export const getDailyTrendsReport = async (
     });
   }
 };
+
+/*
+|--------------------------------------------------------------------------
+| Admin: Get consultation conversion report
+|--------------------------------------------------------------------------
+|
+| GET /api/admin/reports/consultation-conversion
+|
+| Optional query:
+| ?dateFrom=2026-07-01
+| ?dateTo=2026-07-31
+|
+| How many paid video consultations happened, how many resolved
+| remotely vs. needed a follow-up visit, and what happened to the
+| credits those follow-ups earned (still available / redeemed /
+| expired unused). booking_type / consultation_outcome /
+| consultation_credits are all raw SQL here — same reasoning as
+| everywhere else in this feature: not in the generated Prisma Client
+| until `prisma generate` runs against a migrated database.
+|--------------------------------------------------------------------------
+*/
+
+export const getConsultationConversionReport = async (
+  request: AuthenticatedRequest,
+  response: Response,
+) => {
+  try {
+    const { dateFrom, dateTo } = parseDateRange(
+      request.query.dateFrom,
+      request.query.dateTo,
+    );
+
+    const [outcomeRow] = await prisma.$queryRaw<
+      Array<{
+        total_consultations: bigint;
+        resolved_count: bigint;
+        needs_visit_count: bigint;
+        awaiting_outcome_count: bigint;
+      }>
+    >`
+      SELECT
+        COUNT(*) FILTER (WHERE booking_type = 'video_consultation') AS total_consultations,
+        COUNT(*) FILTER (
+          WHERE booking_type = 'video_consultation'
+            AND consultation_outcome = 'resolved'
+        ) AS resolved_count,
+        COUNT(*) FILTER (
+          WHERE booking_type = 'video_consultation'
+            AND consultation_outcome = 'needs_visit'
+        ) AS needs_visit_count,
+        COUNT(*) FILTER (
+          WHERE booking_type = 'video_consultation'
+            AND consultation_outcome IS NULL
+            AND status NOT IN ('cancelled')
+        ) AS awaiting_outcome_count
+      FROM bookings
+      WHERE (${dateFrom ?? null}::timestamp IS NULL OR created_at >= ${dateFrom ?? null})
+        AND (${dateTo ?? null}::timestamp IS NULL OR created_at <= ${dateTo ?? null})
+    `;
+
+    const creditRows = await prisma.$queryRaw<
+      Array<{ status: string; credit_count: bigint; total_amount: string }>
+    >`
+      SELECT status, COUNT(*) AS credit_count, COALESCE(SUM(credit_amount), 0) AS total_amount
+      FROM consultation_credits
+      WHERE (${dateFrom ?? null}::timestamp IS NULL OR created_at >= ${dateFrom ?? null})
+        AND (${dateTo ?? null}::timestamp IS NULL OR created_at <= ${dateTo ?? null})
+      GROUP BY status
+    `;
+
+    const creditsByStatus = {
+      available: { count: 0, total_amount: 0 },
+      redeemed: { count: 0, total_amount: 0 },
+      expired: { count: 0, total_amount: 0 },
+    };
+
+    for (const row of creditRows) {
+      if (row.status in creditsByStatus) {
+        creditsByStatus[row.status as keyof typeof creditsByStatus] = {
+          count: Number(row.credit_count),
+          total_amount: Number(row.total_amount),
+        };
+      }
+    }
+
+    const totalConsultations = Number(outcomeRow?.total_consultations ?? 0n);
+    const resolvedCount = Number(outcomeRow?.resolved_count ?? 0n);
+    const needsVisitCount = Number(outcomeRow?.needs_visit_count ?? 0n);
+    const awaitingOutcomeCount = Number(
+      outcomeRow?.awaiting_outcome_count ?? 0n,
+    );
+
+    const outcomesRecorded = resolvedCount + needsVisitCount;
+
+    const conversionRate =
+      outcomesRecorded > 0
+        ? Number(((needsVisitCount / outcomesRecorded) * 100).toFixed(1))
+        : 0;
+
+    return response.status(200).json({
+      message: "Consultation conversion report fetched successfully",
+
+      date_range: {
+        date_from: dateFrom ? dateFrom.toISOString() : null,
+        date_to: dateTo ? dateTo.toISOString() : null,
+      },
+
+      consultations: {
+        total: totalConsultations,
+        resolved: resolvedCount,
+        needs_visit: needsVisitCount,
+        awaiting_outcome: awaitingOutcomeCount,
+        conversion_rate_percent: conversionRate,
+      },
+
+      credits: creditsByStatus,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      ["INVALID_START_DATE", "INVALID_END_DATE", "INVALID_DATE_RANGE"].includes(
+        error.message,
+      )
+    ) {
+      return response.status(400).json({
+        message:
+          error.message === "INVALID_START_DATE"
+            ? "Invalid start date"
+            : error.message === "INVALID_END_DATE"
+              ? "Invalid end date"
+              : "Start date cannot be after end date",
+      });
+    }
+
+    console.error("Consultation conversion report error:", error);
+
+    return response.status(500).json({
+      message:
+        "Something went wrong while fetching the consultation conversion report",
+    });
+  }
+};

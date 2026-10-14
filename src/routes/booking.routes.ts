@@ -3,6 +3,11 @@ import { Router } from "express";
 import { ROLE_NAMES } from "../constants/roles";
 
 import {
+  listMyConsultationCredits,
+  setConsultationOutcome,
+} from "../controllers/consultation.controller";
+
+import {
   assignProviderToBooking,
   cancelBookingForAdmin,
   getAllBookingsForAdmin,
@@ -52,6 +57,13 @@ router.get(
   authenticateUser,
   allowRoles(ROLE_NAMES.CUSTOMER),
   getMyBookings,
+);
+
+router.get(
+  "/consultation-credits",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.CUSTOMER),
+  listMyConsultationCredits,
 );
 
 router.patch(
@@ -124,6 +136,14 @@ router.patch(
   allowRoles(ROLE_NAMES.PROVIDER),
   requireApprovedProvider,
   completeAssignedBooking,
+);
+
+router.patch(
+  "/provider/:id/consultation-outcome",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.PROVIDER),
+  requireApprovedProvider,
+  setConsultationOutcome,
 );
 
 router.post(

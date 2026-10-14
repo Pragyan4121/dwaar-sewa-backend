@@ -30,6 +30,8 @@ model bookings {
   customer_payable_amount         Decimal?  @db.Decimal(10, 2)
   promo_discount_percent_snapshot Decimal?  @db.Decimal(5, 2)
   promo_max_discount_snapshot     Decimal?  @db.Decimal(10, 2)
+  booking_type                    String    @default("home_visit") @db.VarChar(20)
+  consultation_outcome            String?   @db.VarChar(20)
   created_at                      DateTime? @default(now()) @db.Timestamp(6)
   updated_at                      DateTime? @default(now()) @db.Timestamp(6)
   accepted_at                     DateTime? @db.Timestamp(6)
@@ -48,6 +50,8 @@ model bookings {
   services                          services                 @relation(fields: [service_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_bookings_service")
   promotion                         promotion_campaigns?     @relation(fields: [promotion_id], references: [id], onDelete: SetNull)
   promotion_redemption              promotion_redemptions?
+  consultation_credit_earned        consultation_credits?    @relation("consultation_credit_source")
+  consultation_credit_used          consultation_credits?    @relation("consultation_credit_redemption")
   notifications                     notifications[]
   payments                          payments?
   reviews                           reviews?
@@ -143,6 +147,30 @@ model promotion_redemptions {
   @@index([customer_id, promotion_id], map: "idx_promo_redemptions_customer_promotion")
 }
 
+/// A single-use credit earned by paying for a video consultation that a
+/// provider determined needs a follow-up home visit. Mirrors
+/// promotion_redemptions in shape: a row-lockable record rather than a
+/// raw balance, so it can be redeemed exactly once and its origin is
+/// always traceable back to the consultation booking that earned it.
+model consultation_credits {
+  id                      Int       @id @default(autoincrement())
+  consultation_booking_id Int       @unique
+  customer_id             Int
+  credit_amount           Decimal   @db.Decimal(10, 2)
+  status                  String    @default("available") @db.VarChar(20)
+  redeemed_booking_id     Int?      @unique
+  expires_at              DateTime  @db.Timestamp(6)
+  created_at              DateTime  @default(now()) @db.Timestamp(6)
+  redeemed_at             DateTime? @db.Timestamp(6)
+
+  consultation_booking bookings @relation("consultation_credit_source", fields: [consultation_booking_id], references: [id], onDelete: Restrict)
+  customer             users    @relation(fields: [customer_id], references: [id], onDelete: Restrict)
+  redeemed_booking      bookings? @relation("consultation_credit_redemption", fields: [redeemed_booking_id], references: [id], onDelete: SetNull)
+
+  @@index([customer_id, status], map: "idx_consultation_credits_customer_status")
+  @@index([status, expires_at], map: "idx_consultation_credits_expires")
+}
+
 model roles {
   id         Int       @id @default(autoincrement())
   name       String    @unique @db.VarChar(50)
@@ -156,6 +184,7 @@ model services {
   name             String    @unique @db.VarChar(100)
   description      String?
   base_price       Decimal   @db.Decimal(10, 2)
+  video_consultation_price Decimal? @db.Decimal(10, 2)
   duration_minutes Int?
   is_active        Boolean?  @default(true)
   created_at       DateTime? @default(now()) @db.Timestamp(6)
@@ -205,6 +234,7 @@ model users {
   withdrawals_processed_byTousers                          withdrawals[]                   @relation("withdrawals_processed_byTousers")
   providerCategories                                       provider_categories[]           @relation(map: "fk_provider_categories_provider")
   promotion_redemptions                                    promotion_redemptions[]
+  consultation_credits                                     consultation_credits[]
 
   chat_rooms_chat_rooms_customer_idTousers               chat_rooms[]     @relation("chat_rooms_customer_idTousers")
   chat_rooms_chat_rooms_provider_idTousers               chat_rooms[]     @relation("chat_rooms_provider_idTousers")

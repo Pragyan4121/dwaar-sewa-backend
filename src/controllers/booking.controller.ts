@@ -1,4 +1,5 @@
 import type { Response } from "express";
+import { Prisma } from "../generated/prisma/client";
 import { prisma } from "../config/prisma";
 import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
 import {
@@ -7,6 +8,10 @@ import {
 } from "../services/booking-event.service";
 import { resolveCustomerBookingAddress } from "../services/customer-address.service";
 import { safelySyncOrderChatWithBookingStatus } from "../services/order-chat-lifecycle.service";
+import {
+  lockAndValidateConsultationCredit,
+  redeemConsultationCredit,
+} from "../services/consultation-credit.service";
 import {
   ALL_PAYMENT_METHODS,
   PAYMENT_METHODS,
@@ -36,6 +41,8 @@ export const createBooking = async (
       notes,
       paymentMethod,
       promoCode,
+      bookingType,
+      consultationCreditId,
     } = request.body;
 
     if (!customerId) {
@@ -205,6 +212,58 @@ export const createBooking = async (
 
     /*
     |--------------------------------------------------------------------------
+    | Validate booking type
+    |--------------------------------------------------------------------------
+    |
+    | video_consultation_price lives on the services table but isn't yet
+    | in the generated Prisma Client's `services` select type (see
+    | consultation-credit.service.ts for why) — fetched via raw SQL here
+    | rather than added to the select above.
+    |--------------------------------------------------------------------------
+    */
+
+    const normalizedBookingType =
+      typeof bookingType === "string" && bookingType.trim().length > 0
+        ? bookingType.trim().toLowerCase()
+        : "home_visit";
+
+    if (!["home_visit", "video_consultation"].includes(normalizedBookingType)) {
+      return response.status(400).json({
+        message:
+          "bookingType must be either 'home_visit' or 'video_consultation'",
+      });
+    }
+
+    const isVideoConsultation = normalizedBookingType === "video_consultation";
+
+    let videoConsultationPrice: number | null = null;
+
+    if (isVideoConsultation) {
+      const [priceRow] = await prisma.$queryRaw<
+        Array<{ video_consultation_price: string | null }>
+      >`
+        SELECT video_consultation_price
+        FROM services
+        WHERE id = ${service.id}
+      `;
+
+      videoConsultationPrice = priceRow?.video_consultation_price
+        ? Number(priceRow.video_consultation_price)
+        : null;
+
+      if (
+        videoConsultationPrice === null ||
+        !Number.isFinite(videoConsultationPrice)
+      ) {
+        return response.status(400).json({
+          message: "This service does not offer video consultation",
+          code: "VIDEO_CONSULTATION_NOT_OFFERED",
+        });
+      }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
     | Resolve saved or manually entered address
     |--------------------------------------------------------------------------
     */
@@ -260,7 +319,9 @@ export const createBooking = async (
     |--------------------------------------------------------------------------
     */
 
-    const grossAmount = Number(service.base_price);
+    const grossAmount = isVideoConsultation
+      ? (videoConsultationPrice as number)
+      : Number(service.base_price);
 
     let selectedPromotion: {
       id: number;
@@ -501,6 +562,55 @@ export const createBooking = async (
         }
       }
 
+      /*
+      |--------------------------------------------------------------------------
+      | Lock and redeem a consultation credit, if one was supplied
+      |--------------------------------------------------------------------------
+      |
+      | Only meaningful for a home-visit booking — a credit is earned by
+      | a video consultation and spent on the follow-up visit, so it
+      | can't be applied to another video consultation. Stacks with a
+      | promo code: both discounts subtract from grossAmount, capped so
+      | the customer never pays less than zero.
+      |--------------------------------------------------------------------------
+      */
+
+      let appliedConsultationCredit: {
+        id: number;
+        amount: number;
+      } | null = null;
+
+      const parsedConsultationCreditId = Number(consultationCreditId);
+
+      if (
+        !isVideoConsultation &&
+        Number.isInteger(parsedConsultationCreditId) &&
+        parsedConsultationCreditId > 0
+      ) {
+        const credit = await lockAndValidateConsultationCredit(transaction, {
+          creditId: parsedConsultationCreditId,
+          customerId,
+        });
+
+        appliedConsultationCredit = {
+          id: credit.id,
+          amount: Number(credit.credit_amount),
+        };
+      }
+
+      const promoDiscountAmount = selectedPromotion?.discountAmount ?? 0;
+
+      const combinedDiscountAmount = Number(
+        Math.min(
+          grossAmount,
+          promoDiscountAmount + (appliedConsultationCredit?.amount ?? 0),
+        ).toFixed(2),
+      );
+
+      const combinedPayableAmount = Number(
+        Math.max(0, grossAmount - combinedDiscountAmount).toFixed(2),
+      );
+
       const createdBooking = await transaction.bookings.create({
         data: {
           customer_id: customerId,
@@ -518,7 +628,7 @@ export const createBooking = async (
           status: "pending",
           payment_method: normalizedPaymentMethod,
 
-          estimated_price: service.base_price,
+          estimated_price: grossAmount,
           final_price: null,
 
           promotion_id: selectedPromotion?.id ?? null,
@@ -531,10 +641,9 @@ export const createBooking = async (
           promo_max_discount_snapshot:
             selectedPromotion?.maxDiscountAmount ?? null,
 
-          discount_amount: selectedPromotion?.discountAmount ?? 0,
+          discount_amount: combinedDiscountAmount,
 
-          customer_payable_amount:
-            selectedPromotion?.payableAmount ?? service.base_price,
+          customer_payable_amount: combinedPayableAmount,
 
           accepted_at: null,
           assigned_at: null,
@@ -585,12 +694,25 @@ export const createBooking = async (
             customer_id: customerId,
             booking_id: createdBooking.id,
             promo_code: selectedPromotion.code,
-            gross_amount: service.base_price,
+            gross_amount: grossAmount,
             discount_amount: selectedPromotion.discountAmount,
             payable_amount: selectedPromotion.payableAmount,
           },
         });
       }
+
+      if (appliedConsultationCredit) {
+        await redeemConsultationCredit(transaction, {
+          creditId: appliedConsultationCredit.id,
+          redeemedBookingId: createdBooking.id,
+        });
+      }
+
+      await transaction.$executeRaw`
+        UPDATE bookings
+        SET booking_type = ${normalizedBookingType}
+        WHERE id = ${createdBooking.id}
+      `;
 
       await transaction.booking_status_history.create({
         data: {
@@ -605,14 +727,25 @@ export const createBooking = async (
         },
       });
 
+      const discountNotes = [
+        selectedPromotion
+          ? `Promo ${selectedPromotion.code} saved you Rs. ${selectedPromotion.discountAmount}.`
+          : null,
+        appliedConsultationCredit
+          ? `Your consultation credit saved you Rs. ${appliedConsultationCredit.amount}.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" ");
+
       await transaction.notifications.create({
         data: {
           user_id: customerId,
           booking_id: createdBooking.id,
           notification_type: "booking_created",
           title: "Service Request Submitted",
-          message: selectedPromotion
-            ? `Your request for ${service.name} has been submitted. Promo ${selectedPromotion.code} saved you Rs. ${selectedPromotion.discountAmount}.`
+          message: discountNotes
+            ? `Your request for ${service.name} has been submitted. ${discountNotes}`
             : `Your request for ${service.name} has been submitted successfully.`,
           is_read: false,
           read_at: null,
@@ -661,6 +794,27 @@ export const createBooking = async (
         return response.status(400).json({
           message: "This promo code is available only for your first booking",
           code: "PROMO_FIRST_BOOKING_ONLY",
+        });
+      }
+
+      if (error.message === "CONSULTATION_CREDIT_NOT_FOUND") {
+        return response.status(400).json({
+          message: "That consultation credit could not be found",
+          code: "CONSULTATION_CREDIT_NOT_FOUND",
+        });
+      }
+
+      if (error.message === "CONSULTATION_CREDIT_ALREADY_REDEEMED") {
+        return response.status(400).json({
+          message: "That consultation credit has already been used",
+          code: "CONSULTATION_CREDIT_ALREADY_REDEEMED",
+        });
+      }
+
+      if (error.message === "CONSULTATION_CREDIT_EXPIRED") {
+        return response.status(400).json({
+          message: "That consultation credit has expired",
+          code: "CONSULTATION_CREDIT_EXPIRED",
         });
       }
     }
@@ -1261,9 +1415,33 @@ export const getAssignedBookingsForProvider = async (
       },
     });
 
+    /*
+     * booking_type isn't in the generated Prisma Client yet — same
+     * situation as getProviderBookingById just above. Fetched for the
+     * whole list in one query (not N+1) and merged in by id, so the
+     * provider's job list can show a "Video Consultation" badge.
+     */
+    const bookingIds = bookings.map((booking) => booking.id);
+
+    const consultationRows =
+      bookingIds.length > 0
+        ? await prisma.$queryRaw<Array<{ id: number; booking_type: string }>>`
+            SELECT id, booking_type
+            FROM bookings
+            WHERE id IN (${Prisma.join(bookingIds)})
+          `
+        : [];
+
+    const bookingTypeById = new Map(
+      consultationRows.map((row) => [row.id, row.booking_type]),
+    );
+
     return response.status(200).json({
       message: "Assigned bookings fetched successfully",
-      bookings,
+      bookings: bookings.map((booking) => ({
+        ...booking,
+        booking_type: bookingTypeById.get(booking.id) ?? "home_visit",
+      })),
     });
   } catch (error) {
     console.error("Provider bookings error:", error);

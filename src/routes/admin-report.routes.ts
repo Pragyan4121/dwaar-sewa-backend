@@ -3,6 +3,7 @@ import { Router } from "express";
 import { ROLE_NAMES } from "../constants/roles";
 import {
   getAdminReportsOverview,
+  getConsultationConversionReport,
   getDailyTrendsReport,
   getTopProvidersReport,
   getTopServicesReport,
@@ -48,6 +49,14 @@ router.get(
   authenticateUser,
   allowRoles(ROLE_NAMES.ADMIN),
   getDailyTrendsReport,
+);
+
+// Video-consultation-to-home-visit conversion
+router.get(
+  "/consultation-conversion",
+  authenticateUser,
+  allowRoles(ROLE_NAMES.ADMIN),
+  getConsultationConversionReport,
 );
 
 export default router;

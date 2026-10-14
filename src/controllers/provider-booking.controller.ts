@@ -309,9 +309,29 @@ export const getProviderBookingById = async (
       });
     }
 
+    /*
+     * booking_type / consultation_outcome aren't in the generated
+     * Prisma Client's `bookings` select type yet — same situation as
+     * order-chat.controller.ts's getOrderChat. Merged in here so the
+     * provider app can show a "Video Consultation" badge and, once the
+     * call has happened, the Resolved/Needs Visit action instead of the
+     * normal "Complete job" flow.
+     */
+    const [consultationRow] = await prisma.$queryRaw<
+      Array<{ booking_type: string; consultation_outcome: string | null }>
+    >`
+      SELECT booking_type, consultation_outcome
+      FROM bookings
+      WHERE id = ${booking.id}
+    `;
+
     return response.status(200).json({
       message: "Provider booking fetched successfully",
-      booking,
+      booking: {
+        ...booking,
+        booking_type: consultationRow?.booking_type ?? "home_visit",
+        consultation_outcome: consultationRow?.consultation_outcome ?? null,
+      },
     });
   } catch (error) {
     console.error("Get provider booking details error:", error);

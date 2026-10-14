@@ -54,8 +54,8 @@ interface AuthenticatedSocketData {
 
 interface StartCallPayload {
   bookingId?: number;
-  callType?: "audio";
-  call_type?: "audio";
+  callType?: "audio" | "video";
+  call_type?: "audio" | "video";
 }
 
 interface CallActionPayload {
@@ -93,6 +93,8 @@ interface ActiveCall {
   recipientRole: SocketChatRole;
 
   status: "ringing" | "accepted";
+
+  callType: "audio" | "video";
 
   startedAt: Date;
 
@@ -471,6 +473,50 @@ async function getCallBookingAccess(input: {
 
 /*
 |--------------------------------------------------------------------------
+| Video-call eligibility
+|--------------------------------------------------------------------------
+|
+| A "video" call is the paid guidance feature — gated separately from
+| the existing free "audio" call, which stays available on any active
+| booking exactly as it already worked. Video is only allowed on a
+| booking that's actually a paid video-consultation booking, and only
+| before the provider has recorded an outcome for it (once an outcome is
+| set the consultation is done — see consultation.controller.ts).
+|
+| booking_type / consultation_outcome are read via raw SQL for the same
+| reason as the rest of the consultation-credit feature: they aren't in
+| the generated Prisma Client until `prisma generate` has been run
+| against a migrated database.
+|--------------------------------------------------------------------------
+*/
+
+async function isEligibleForVideoCall(bookingId: number): Promise<boolean> {
+  const [row] = await prisma.$queryRaw<
+    Array<{
+      booking_type: string;
+      consultation_outcome: string | null;
+      payment_status: string | null;
+    }>
+  >`
+    SELECT b.booking_type, b.consultation_outcome, p.payment_status
+    FROM bookings b
+    LEFT JOIN payments p ON p.booking_id = b.id
+    WHERE b.id = ${bookingId}
+  `;
+
+  if (!row) {
+    return false;
+  }
+
+  return (
+    row.booking_type === "video_consultation" &&
+    row.consultation_outcome === null &&
+    row.payment_status === "paid"
+  );
+}
+
+/*
+|--------------------------------------------------------------------------
 | Validate participant against active call
 |--------------------------------------------------------------------------
 */
@@ -557,14 +603,24 @@ function emitToUser(
 |--------------------------------------------------------------------------
 */
 
-export function initializeChatSocket(httpServer: HttpServer): Server {
+export function initializeChatSocket(
+  httpServer: HttpServer,
+  allowedOrigins: string[],
+): Server {
   if (io) {
     return io;
   }
 
   io = new Server(httpServer, {
     cors: {
-      origin: true,
+      // Previously `origin: true`, which reflects and allows literally
+      // any origin. That's broader than this needs to be — socket auth
+      // does require a real JWT (see authenticateSocket below), which a
+      // remote page can't obtain, but there's no reason for the
+      // handshake itself to accept connection attempts from arbitrary
+      // origins when the REST API right next to it only trusts these
+      // four.
+      origin: allowedOrigins,
 
       credentials: true,
     },
@@ -634,6 +690,62 @@ export function initializeChatSocket(httpServer: HttpServer): Server {
     console.log(
       `Chat socket connected: user=${socketUser.userId} role=${socketUser.roleName}`,
     );
+
+    /*
+      |--------------------------------------------------------------------------
+      | Per-socket flood protection
+      |--------------------------------------------------------------------------
+      |
+      | Every event below (chat:join, chat:leave, message sends, etc.)
+      | typically triggers a DB write and/or a broadcast to another
+      | connected user — unlike the REST API, none of that goes through
+      | the HTTP rate limiters in rate-limit.middleware.ts, since this is
+      | a persistent connection a single authenticated user could script
+      | to fire events as fast as the transport allows. socket.use() runs
+      | on every incoming packet for this socket, so this one check
+      | covers all handlers uniformly rather than needing to be threaded
+      | into each of them individually.
+      |
+      | This is an in-memory sliding window, which is correct for a
+      | single Node process. If this backend is ever run as multiple
+      | instances behind a load balancer, this would need to move to a
+      | shared store (e.g. Redis) since each instance would otherwise
+      | track its own, independent counter per socket.
+      |--------------------------------------------------------------------------
+      */
+
+    const eventTimestamps: number[] = [];
+    const EVENT_WINDOW_MS = 10_000;
+    const MAX_EVENTS_PER_WINDOW = 30;
+
+    socket.use((_packet, next) => {
+      const now = Date.now();
+
+      while (
+        eventTimestamps.length > 0 &&
+        now - eventTimestamps[0] > EVENT_WINDOW_MS
+      ) {
+        eventTimestamps.shift();
+      }
+
+      if (eventTimestamps.length >= MAX_EVENTS_PER_WINDOW) {
+        // Disconnect rather than just dropping the packet: a client
+        // that's already flooding isn't going to respect a soft
+        // rejection, and holding the connection open just lets it keep
+        // trying.
+        socket.emit("chat:rate_limited", {
+          message: "Too many chat events. Please slow down.",
+        });
+
+        socket.disconnect(true);
+
+        return;
+      }
+
+      eventTimestamps.push(now);
+
+      next();
+    });
 
     /*
       |--------------------------------------------------------------------------
@@ -893,6 +1005,28 @@ export function initializeChatSocket(httpServer: HttpServer): Server {
             return;
           }
 
+          const requestedCallType: "audio" | "video" =
+            payload?.callType === "video" || payload?.call_type === "video"
+              ? "video"
+              : "audio";
+
+          if (requestedCallType === "video") {
+            const eligible = await isEligibleForVideoCall(bookingId);
+
+            if (!eligible) {
+              callback?.({
+                ok: false,
+
+                code: "VIDEO_CALL_NOT_AVAILABLE",
+
+                message:
+                  "Video guidance is only available for a paid video-consultation booking that hasn't already been completed.",
+              });
+
+              return;
+            }
+          }
+
           const callId = randomUUID();
 
           const call: ActiveCall = {
@@ -913,6 +1047,8 @@ export function initializeChatSocket(httpServer: HttpServer): Server {
             recipientRole: access.otherRole,
 
             status: "ringing",
+
+            callType: requestedCallType,
 
             startedAt: new Date(),
 
@@ -945,7 +1081,7 @@ export function initializeChatSocket(httpServer: HttpServer): Server {
             callerName,
             recipientUserId: call.recipientUserId,
             recipientRole: call.recipientRole,
-            callType: "audio",
+            callType: call.callType,
             startedAt: call.startedAt,
           });
 
@@ -959,6 +1095,8 @@ export function initializeChatSocket(httpServer: HttpServer): Server {
             recipientUserId: call.recipientUserId,
 
             status: "ringing",
+
+            callType: call.callType,
 
             startedAt: call.startedAt,
           });

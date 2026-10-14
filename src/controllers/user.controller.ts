@@ -221,9 +221,13 @@ export const loginUser = async (request: Request, response: Response) => {
     });
 
     if (!user) {
+      // Deliberately identical to the "wrong password" response below
+      // (same message, same status code) so a prober can't distinguish
+      // "this phone/email isn't registered" from "it is, but the
+      // password is wrong" — see csrf.middleware.ts's sibling concern,
+      // account enumeration, for why that distinction matters.
       return response.status(401).json({
-        message: "No customer account found with this email or phone number",
-        field: "email",
+        message: "Invalid phone/email or password",
       });
     }
 
@@ -237,8 +241,7 @@ export const loginUser = async (request: Request, response: Response) => {
 
     if (!passwordMatches) {
       return response.status(401).json({
-        message: "Incorrect password",
-        field: "password",
+        message: "Invalid phone/email or password",
       });
     }
 
