@@ -4,6 +4,65 @@ import type { AuthenticatedRequest } from "../middlewares/auth.middleware";
 
 /*
 |--------------------------------------------------------------------------
+| Video consultation price helpers
+|--------------------------------------------------------------------------
+|
+| video_consultation_price is read and written with raw SQL so this file
+| compiles whether or not the Prisma client has been regenerated yet.
+| undefined = not sent (leave unchanged), null/"" = clear (disable the
+| option), number = set the price.
+|
+*/
+
+type VideoPriceParse =
+  | { valid: true; value: number | null | undefined }
+  | { valid: false };
+
+const parseVideoConsultationPrice = (input: unknown): VideoPriceParse => {
+  if (input === undefined) {
+    return { valid: true, value: undefined };
+  }
+
+  if (input === null || input === "") {
+    return { valid: true, value: null };
+  }
+
+  const parsed = Number(input);
+
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 99999999) {
+    return { valid: false };
+  }
+
+  return { valid: true, value: Math.round(parsed * 100) / 100 };
+};
+
+const saveVideoConsultationPrice = async (
+  serviceId: number,
+  price: number | null,
+) => {
+  await prisma.$executeRaw`
+    UPDATE services
+    SET video_consultation_price = CAST(${price === null ? null : price.toFixed(2)} AS NUMERIC(10, 2))
+    WHERE id = ${serviceId}
+  `;
+};
+
+const readVideoConsultationPrice = async (
+  serviceId: number,
+): Promise<string | null> => {
+  const rows = await prisma.$queryRaw<
+    Array<{ video_consultation_price: string | null }>
+  >`
+    SELECT video_consultation_price::text AS video_consultation_price
+    FROM services
+    WHERE id = ${serviceId}
+  `;
+
+  return rows[0]?.video_consultation_price ?? null;
+};
+
+/*
+|--------------------------------------------------------------------------
 | Admin: Create service
 |--------------------------------------------------------------------------
 */
@@ -20,7 +79,16 @@ export const createService = async (
       durationMinutes,
       categoryId,
       isActive,
+      videoConsultationPrice,
     } = request.body;
+
+    const videoPrice = parseVideoConsultationPrice(videoConsultationPrice);
+
+    if (!videoPrice.valid) {
+      return response.status(400).json({
+        message: "Video consultation price must be a valid non-negative amount",
+      });
+    }
 
     if (
       typeof name !== "string" ||
@@ -143,9 +211,16 @@ export const createService = async (
       },
     });
 
+    if (typeof videoPrice.value === "number") {
+      await saveVideoConsultationPrice(service.id, videoPrice.value);
+    }
+
     return response.status(201).json({
       message: "Service created successfully",
-      service,
+      service: {
+        ...service,
+        video_consultation_price: await readVideoConsultationPrice(service.id),
+      },
     });
   } catch (error) {
     console.error("Create service error:", error);
@@ -194,7 +269,16 @@ export const updateService = async (
       durationMinutes,
       categoryId,
       isActive,
+      videoConsultationPrice,
     } = request.body;
+
+    const videoPrice = parseVideoConsultationPrice(videoConsultationPrice);
+
+    if (!videoPrice.valid) {
+      return response.status(400).json({
+        message: "Video consultation price must be a valid non-negative amount",
+      });
+    }
 
     if (
       name !== undefined &&
@@ -361,9 +445,16 @@ export const updateService = async (
       },
     });
 
+    if (videoPrice.value !== undefined) {
+      await saveVideoConsultationPrice(serviceId, videoPrice.value);
+    }
+
     return response.status(200).json({
       message: "Service updated successfully",
-      service: updatedService,
+      service: {
+        ...updatedService,
+        video_consultation_price: await readVideoConsultationPrice(serviceId),
+      },
     });
   } catch (error) {
     console.error("Update service error:", error);
@@ -420,7 +511,10 @@ export const getServiceByIdForAdmin = async (
 
     return response.status(200).json({
       message: "Service fetched successfully",
-      service,
+      service: {
+        ...service,
+        video_consultation_price: await readVideoConsultationPrice(serviceId),
+      },
     });
   } catch (error) {
     console.error("Get service error:", error);

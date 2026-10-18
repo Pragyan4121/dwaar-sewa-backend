@@ -24,6 +24,44 @@ import {
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| Booking time rules (all evaluated in the business time zone)
+|--------------------------------------------------------------------------
+|
+| The server may run in UTC, but customers book in local (Nepal) time, so
+| "today" and "now" are computed in BOOKING_TIME_ZONE.
+|
+*/
+
+const BOOKING_TIME_ZONE = process.env.BOOKING_TIME_ZONE || "Asia/Kathmandu";
+const ASAP_START_MINUTES = 6 * 60;
+const ASAP_END_MINUTES = 20 * 60;
+
+const getZonedNow = () => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BOOKING_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+
+  const read = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "00";
+
+  const hour = Number(read("hour"));
+  const minute = Number(read("minute"));
+
+  return {
+    date: `${read("year")}-${read("month")}-${read("day")}`,
+    minutes: hour * 60 + minute,
+    time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
+  };
+};
+
 export const createBooking = async (
   request: AuthenticatedRequest,
   response: Response,
@@ -38,6 +76,7 @@ export const createBooking = async (
       serviceArea,
       preferredDate,
       preferredTime,
+      isAsap,
       notes,
       paymentMethod,
       promoCode,
@@ -133,6 +172,64 @@ export const createBooking = async (
         });
       }
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Time rules: no past dates/times, ASAP only for today within hours
+    |--------------------------------------------------------------------------
+    */
+
+    const zonedNow = getZonedNow();
+
+    const requestedDateKey = parsedPreferredDate.toISOString().slice(0, 10);
+
+    if (requestedDateKey < zonedNow.date) {
+      return response.status(400).json({
+        message: "Preferred date cannot be in the past",
+      });
+    }
+
+    const wantsAsap = isAsap === true || isAsap === "true";
+
+    if (wantsAsap) {
+      if (requestedDateKey !== zonedNow.date) {
+        return response.status(400).json({
+          message: "ASAP bookings can only be made for today",
+        });
+      }
+
+      if (
+        zonedNow.minutes < ASAP_START_MINUTES ||
+        zonedNow.minutes >= ASAP_END_MINUTES
+      ) {
+        return response.status(400).json({
+          message:
+            "ASAP is only available between 6:00 AM and 8:00 PM. Please choose a scheduled time.",
+        });
+      }
+
+      parsedPreferredTime = new Date(`1970-01-01T${zonedNow.time}:00.000Z`);
+    } else if (parsedPreferredTime && requestedDateKey === zonedNow.date) {
+      const requestedMinutes =
+        parsedPreferredTime.getUTCHours() * 60 +
+        parsedPreferredTime.getUTCMinutes();
+
+      if (requestedMinutes <= zonedNow.minutes) {
+        return response.status(400).json({
+          message: "That time has already passed. Please choose a later time.",
+        });
+      }
+    }
+
+    const bookingNotes =
+      [
+        wantsAsap ? "ASAP request - customer needs help within 2 hours." : null,
+        typeof notes === "string" && notes.trim().length > 0
+          ? notes.trim()
+          : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join("\n") || null;
 
     if (notes !== undefined && notes !== null && typeof notes !== "string") {
       return response.status(400).json({
@@ -621,10 +718,7 @@ export const createBooking = async (
           service_area: resolvedAddress.serviceArea,
           preferred_date: parsedPreferredDate,
           preferred_time: parsedPreferredTime,
-          notes:
-            typeof notes === "string" && notes.trim().length > 0
-              ? notes.trim()
-              : null,
+          notes: bookingNotes,
           status: "pending",
           payment_method: normalizedPaymentMethod,
 
