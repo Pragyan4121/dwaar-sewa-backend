@@ -443,6 +443,15 @@ export const createBooking = async (
         ? promoCode.trim().toUpperCase()
         : null;
 
+    // Promo codes only apply to home visits. A consultation credit is the
+    // only discount a booking can receive, and only on the home visit.
+    if (isVideoConsultation && normalizedPromoCode) {
+      return response.status(400).json({
+        message: "Promo codes can't be used on video consultations.",
+        code: "PROMO_NOT_ALLOWED_FOR_VIDEO",
+      });
+    }
+
     if (normalizedPromoCode) {
       const now = new Date();
 
