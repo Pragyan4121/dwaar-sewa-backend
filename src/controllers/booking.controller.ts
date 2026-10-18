@@ -333,6 +333,15 @@ export const createBooking = async (
 
     const isVideoConsultation = normalizedBookingType === "video_consultation";
 
+    // A video consultation has no in-person provider to collect cash, so it
+    // must be paid online.
+    if (isVideoConsultation && normalizedPaymentMethod === "cash") {
+      return response.status(400).json({
+        message:
+          "Video consultations must be paid online. Please choose eSewa, Khalti or Connect IPS.",
+      });
+    }
+
     let videoConsultationPrice: number | null = null;
 
     if (isVideoConsultation) {
